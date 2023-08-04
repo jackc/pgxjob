@@ -19,10 +19,6 @@ jobs:
           sudo -u postgres createuser -s runner
           createdb runner
 
-      - name: Migrate test database
-        run: |
-          psql -f migrations/001_pgxjob_setup.sql
-
       - name: Check out code into the Go module directory
         uses: actions/checkout@v3
 
@@ -36,6 +32,10 @@ jobs:
       # with:
       ## limits ssh access and adds the ssh public key for the user which triggered the workflow
       # limit-access-to-actor: true
+
+      - name: Migrate test database
+        run: |
+          psql -f migrations/001_pgxjob_setup.sql
 
       - name: Test
         run: go test -race -v ./...
