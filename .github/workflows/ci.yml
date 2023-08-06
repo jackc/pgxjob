@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  PGXJOB_TEST_DATABASE: runner
+
 on:
   push:
     branches: [master]
@@ -27,15 +30,20 @@ jobs:
         with:
           go-version: "1.20"
 
+      - name: Setup Ruby for Rake
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
       # - name: Setup upterm session
       #   uses: lhotari/action-upterm@v1
       # with:
       ## limits ssh access and adds the ssh public key for the user which triggered the workflow
       # limit-access-to-actor: true
 
-      - name: Migrate test database
+      - name: Prepare test database
         run: |
-          psql -f migrations/001_pgxjob_setup.sql
+          rake test:prepare
 
       - name: Test
         run: go test -race -v ./...
