@@ -162,3 +162,74 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	err = <-startErrChan
 	require.NoError(t, err)
 }
+
+func BenchmarkRunBackloggedJobs(b *testing.B) {
+	conn := mustConnect(b)
+	mustCleanDatabase(b, conn)
+
+	scheduler := pgxjob.NewScheduler()
+	runJobChan := make(chan struct{}, 100)
+	err := scheduler.RegisterJobType(pgxjob.JobType{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			runJobChan <- struct{}{}
+			return nil
+		},
+	})
+	require.NoError(b, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for i := 0; i < b.N; i++ {
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(b, err)
+	}
+
+	dbpool := mustNewDBPool(b)
+
+	workerErrChan := make(chan error, 1)
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		GetConnFunc: pgxjob.GetConnFromPoolFunc(dbpool),
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			select {
+			case workerErrChan <- err:
+			default:
+			}
+		},
+	})
+	require.NoError(b, err)
+	defer worker.Shutdown(context.Background())
+
+	b.ResetTimer()
+
+	startErrChan := make(chan error, 1)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	for i := 0; i < b.N; i++ {
+		select {
+		case <-runJobChan:
+		case err := <-startErrChan:
+			b.Fatalf("startErrChan: %v", err)
+		case err := <-workerErrChan:
+			b.Fatalf("workerErrChan: %v", err)
+		case <-ctx.Done():
+			b.Fatalf("timed out waiting for jobs to finish: %d", i)
+		}
+	}
+
+	err = worker.Shutdown(context.Background())
+	require.NoError(b, err)
+
+	err = <-startErrChan
+	require.NoError(b, err)
+
+	select {
+	case err := <-workerErrChan:
+		b.Fatalf("workerErrChan: %v", err)
+	default:
+	}
+}

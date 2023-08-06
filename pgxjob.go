@@ -421,51 +421,43 @@ func (w *Worker) startJob(job *Job) {
 			}()
 			err = job.Type.RunJob(w.cancelCtx, job)
 		}()
-
-		if err == nil {
-			w.recordJobSuccess(job)
-		} else {
-			w.recordJobError(job, err)
-		}
+		w.recordJobResults(job, err)
 
 	}(job)
 }
 
-// recordJobError records an error that occurred while processing a job. It does not take a context because it should
-// still execute even if the context that controls the overall Worker.Run is cancelled.
-func (w *Worker) recordJobError(job *Job, jobErr error) {
+// recordJobResults records the results of running a job. It does not take a context because it should still execute
+// even if the context that controls the overall Worker.Run is cancelled.
+func (w *Worker) recordJobResults(job *Job, jobErr error) {
+	defer func() {
+		w.mux.Lock()
+		delete(w.runningJobs, job.ID)
+		w.mux.Unlock()
+		w.Signal()
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	conn, release, err := w.GetConnFunc(ctx)
 	if err != nil {
-		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d failure: failed to get connection: %w", job.ID, err))
+		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: failed to get connection: %w", job.ID, err))
 	}
 	defer release()
 
-	_, err = pgxutil.ExecRow(ctx, conn,
-		`update pgxjob_job set error_count = error_count + 1, last_error = $1, locked_until = 'Infinity' where id = $2`,
-		jobErr.Error(), job.ID,
-	)
-	if err != nil {
-		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d failure: %w", job.ID, err))
-	}
-}
-
-// recordJobSuccess records that a job was successfully processed.
-func (w *Worker) recordJobSuccess(job *Job) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, release, err := w.GetConnFunc(ctx)
-	if err != nil {
-		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d success: failed to get connection: %w", job.ID, err))
-	}
-	defer release()
-
-	_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
-	if err != nil {
-		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d success: %w", job.ID, err))
+	if jobErr == nil {
+		_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+		}
+	} else {
+		_, err = pgxutil.ExecRow(ctx, conn,
+			`update pgxjob_job set error_count = error_count + 1, last_error = $1, locked_until = 'Infinity' where id = $2`,
+			jobErr.Error(), job.ID,
+		)
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+		}
 	}
 }
 
@@ -476,11 +468,9 @@ func (w *Worker) handleWorkerError(err error) {
 }
 
 // Signal causes the worker to wake up and process requests. It is safe to call this from multiple goroutines.
-func (w *Worker) Signal() error {
+func (w *Worker) Signal() {
 	select {
 	case w.signalChan <- struct{}{}:
 	default:
 	}
-
-	return nil
 }
