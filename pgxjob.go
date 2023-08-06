@@ -336,7 +336,8 @@ type Job struct {
 	LastError   pgtype.Text
 }
 
-// fetchAndLockJobsSQL is used to fetch and lock jobs in a single query.
+// fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
+// of queue names. $2 is the maximum number of jobs to fetch. $3 is the lock duration.
 //
 // Exactly how concurrency and locking work with CTEs can be confusing, but the "for update skip locked" is held for the
 // entire statement (actually the lock is held for the entire transaction) per Tom Lane
