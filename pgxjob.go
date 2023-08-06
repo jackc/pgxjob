@@ -275,8 +275,8 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 	return w, nil
 }
 
-// Run starts the worker. It runs until ctx is canceled. One worker cannot Run multiple times concurrently.
-func (w *Worker) Run() error {
+// Start starts the worker. It runs until Shutdown is called. One worker cannot Start multiple times concurrently.
+func (w *Worker) Start() error {
 	w.mux.Lock()
 	if w.running {
 		w.mux.Unlock()
@@ -292,7 +292,10 @@ func (w *Worker) Run() error {
 		default:
 		}
 
-		w.fetchAndStartJobs()
+		err := w.fetchAndStartJobs()
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch and start jobs: %w", err))
+		}
 
 		select {
 		case <-w.cancelCtx.Done():
@@ -374,7 +377,20 @@ func (w *Worker) fetchAndStartJobs() error {
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
 		fetchAndLockJobsSQL,
 		[]any{w.QueueNames, availableJobs, lockDuration},
-		pgx.RowToAddrOfStructByPos[Job],
+		func(row pgx.CollectableRow) (*Job, error) {
+			var job Job
+			var jobTypeName string
+			err := row.Scan(
+				&job.ID, &job.QueueName, &job.Priority, &jobTypeName, &job.Params, &job.QueuedAt, &job.RunAt, &job.LockedUntil, &job.ErrorCount, &job.LastError,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			job.Type = w.scheduler.jobTypeByName[jobTypeName]
+
+			return &job, nil
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to lock jobs: %w", err)

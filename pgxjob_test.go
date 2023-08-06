@@ -84,10 +84,12 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	conn := mustConnect(t)
 	mustCleanDatabase(t, conn)
 
+	jobRanChan := make(chan struct{})
 	scheduler := pgxjob.NewScheduler()
 	err := scheduler.RegisterJobType(pgxjob.JobType{
 		Name: "test",
 		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
 			return nil
 		},
 	})
@@ -132,10 +134,31 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	dbpool := mustNewDBPool(t)
 
+	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		GetConnFunc: pgxjob.GetConnFromPoolFunc(dbpool),
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			workerErrChan <- err
+		},
 	})
 	require.NoError(t, err)
 
-	_ = worker
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	select {
+	case <-jobRanChan:
+	case err := <-workerErrChan:
+		t.Fatalf("workerErrChan: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for job to run")
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
 }
