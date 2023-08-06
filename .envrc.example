@@ -1,0 +1,2 @@
+export PGDATABASE=pgxjob_test
+export PGXJOB_TEST_DATABASE=pgxjob_test

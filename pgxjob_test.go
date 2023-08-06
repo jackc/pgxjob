@@ -2,12 +2,14 @@ package pgxjob_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgxjob"
 	"github.com/jackc/pgxutil"
 	"github.com/stretchr/testify/require"
@@ -18,7 +20,12 @@ import (
 func mustConnect(t testing.TB) *pgx.Conn {
 	t.Helper()
 
-	config, err := pgx.ParseConfig(os.Getenv("PGXJOB_TEST_DATABASE"))
+	dbname := os.Getenv("PGXJOB_TEST_DATABASE")
+	if dbname == "" {
+		t.Fatal("PGXJOB_TEST_DATABASE environment variable must be set")
+	}
+
+	config, err := pgx.ParseConfig(fmt.Sprintf("dbname=%s", os.Getenv("PGXJOB_TEST_DATABASE")))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -36,6 +43,30 @@ func mustConnect(t testing.TB) *pgx.Conn {
 	})
 
 	return conn
+}
+
+func mustNewDBPool(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+
+	dbname := os.Getenv("PGXJOB_TEST_DATABASE")
+	if dbname == "" {
+		t.Fatal("PGXJOB_TEST_DATABASE environment variable must be set")
+	}
+
+	config, err := pgxpool.ParseConfig(fmt.Sprintf("dbname=%s", os.Getenv("PGXJOB_TEST_DATABASE")))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		// Close pool in a goroutine to avoid blocking forever if there are connections checked out.
+		go pool.Close()
+	})
+
+	return pool
 }
 
 func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
@@ -56,7 +87,7 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	scheduler := pgxjob.NewScheduler()
 	err := scheduler.RegisterJobType(pgxjob.JobType{
 		Name: "test",
-		RunJob: func(ctx context.Context, paramsJSON []byte) error {
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
 			return nil
 		},
 	})
@@ -78,7 +109,7 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 		Params      []byte
 		QueuedAt    time.Time
 		RunAt       time.Time
-		LockedUntil pgtype.Timestamptz
+		LockedUntil time.Time
 		ErrorCount  int32
 		LastError   pgtype.Text
 	}
@@ -94,7 +125,17 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	require.True(t, job.QueuedAt.Before(afterScheduleNow))
 	require.True(t, job.RunAt.After(startTime))
 	require.True(t, job.RunAt.Before(afterScheduleNow))
-	require.False(t, job.LockedUntil.Valid)
+	require.True(t, job.LockedUntil.After(startTime))
+	require.True(t, job.LockedUntil.Before(afterScheduleNow))
 	require.EqualValues(t, 0, job.ErrorCount)
 	require.False(t, job.LastError.Valid)
+
+	dbpool := mustNewDBPool(t)
+
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		GetConnFunc: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
+	require.NoError(t, err)
+
+	_ = worker
 }

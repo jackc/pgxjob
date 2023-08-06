@@ -6,7 +6,7 @@ create table pgxjob_jobs (
 	params jsonb,
 	queued_at timestamptz not null,
 	run_at timestamptz not null,
-	locked_until timestamptz,
+	locked_until timestamptz not null,
 	error_count integer not null default 0,
 	last_error text
 );
