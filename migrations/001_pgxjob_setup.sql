@@ -3,7 +3,7 @@ create table pgxjob_jobs (
 	queue_name text not null,
 	priority integer not null,
 	type text not null,
-	params jsonb,
+	params json, -- use json instead of jsonb as it is faster for insert.
 	queued_at timestamptz not null,
 	run_at timestamptz not null,
 	locked_until timestamptz not null,
