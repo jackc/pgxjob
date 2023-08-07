@@ -62,7 +62,7 @@ type JobType struct {
 	DefaultQueue *JobQueue
 
 	// DefaultPriority is the default priority to use when enqueuing jobs of this type.
-	DefaultPriority int32
+	DefaultPriority int16
 
 	// RunJob is the function that will be called when a job of this type is run.
 	RunJob func(ctx context.Context, job *Job) error
@@ -122,7 +122,7 @@ type RegisterJobTypeParams struct {
 
 	// DefaultPriority is the default priority to use when enqueuing jobs of this type. The minimum priority is 1. If not
 	// set 100 is used.
-	DefaultPriority int32
+	DefaultPriority int16
 
 	// RunJob is the function that will be called when a job of this type is run. It must be set.
 	RunJob func(ctx context.Context, job *Job) error
@@ -219,7 +219,7 @@ type JobSchedule struct {
 
 	// Priority is the priority to use when enqueuing the job. The minimum priority is 1. If not set the job type's
 	// default priority is used.
-	Priority int32
+	Priority int16
 
 	// RunAt is the time to run the job. If not set the job is scheduled to run immediately.
 	RunAt time.Time
@@ -248,7 +248,7 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 		}
 	}
 
-	var priority int32
+	var priority int16
 	if schedule.Priority > 0 {
 		priority = schedule.Priority
 	} else {
@@ -256,18 +256,20 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 	}
 
 	now := time.Now()
-	var runAt time.Time
-	if !schedule.RunAt.IsZero() {
-		runAt = schedule.RunAt
-	} else {
-		runAt = now
-	}
 
 	batch := &pgx.Batch{}
-	batch.Queue(
-		`insert into pgxjob_jobs (queue_id, priority, type_id, params, queued_at, run_at, next_run_at) values ($1, $2, $3, $4, $5, $6, $7)`,
-		jobQueue.ID, priority, jobType.ID, jobParams, now, runAt, runAt,
-	)
+	if schedule.RunAt.IsZero() {
+		batch.Queue(
+			`insert into pgxjob_jobs (queue_id, priority, type_id, params, queued_at) values ($1, $2, $3, $4, $5)`,
+			jobQueue.ID, priority, jobType.ID, jobParams, now,
+		)
+	} else {
+		batch.Queue(
+			`insert into pgxjob_jobs (queue_id, priority, type_id, params, queued_at, next_run_at) values ($1, $2, $3, $4, $5, $6)`,
+			jobQueue.ID, priority, jobType.ID, jobParams, now, schedule.RunAt,
+		)
+	}
+
 	batch.Queue(`select pg_notify($1, null)`, pgChannelName)
 	err := db.SendBatch(ctx, batch).Close()
 	if err != nil {
@@ -435,7 +437,7 @@ type Job struct {
 const fetchAndLockJobsSQL = `with lock_jobs as (
 	select id
 	from pgxjob_jobs
-	where next_run_at < now()
+	where (next_run_at < now() or next_run_at is null)
 		and queue_id = any($1)
 	order by priority desc, run_at
 	limit $2
@@ -444,7 +446,7 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 update pgxjob_jobs
 set next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, priority, type_id, params, queued_at, run_at, next_run_at, error_count, last_error`
+returning id, queue_id, priority, type_id, params, queued_at, coalesce(run_at, next_run_at, queued_at), coalesce(next_run_at, queued_at), coalesce(error_count, 0), last_error`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()

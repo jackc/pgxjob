@@ -108,39 +108,37 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	type pgxjobJob struct {
 		ID         int64
-		QueueID    int32
-		Priority   int32
-		TypeID     int32
-		Params     []byte
 		QueuedAt   time.Time
-		RunAt      time.Time
-		NextRunAt  time.Time
-		ErrorCount int32
+		NextRunAt  pgtype.Timestamptz
+		RunAt      pgtype.Timestamptz
+		QueueID    int32
+		TypeID     int32
+		ErrorCount pgtype.Int4
+		Priority   int16
 		LastError  pgtype.Text
+		Params     []byte
 	}
 
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
 
+	require.True(t, job.QueuedAt.After(startTime))
+	require.True(t, job.QueuedAt.Before(afterScheduleNow))
+	require.False(t, job.NextRunAt.Valid)
+	require.False(t, job.RunAt.Valid)
+
 	defaultQueueID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_queues where name = 'default'`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
 	require.Equal(t, defaultQueueID, job.QueueID)
-
-	require.EqualValues(t, 100, job.Priority)
 
 	testJobTypeID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_types where name = 'test'`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
 	require.Equal(t, testJobTypeID, job.TypeID)
 
-	require.Equal(t, []byte(nil), job.Params)
-	require.True(t, job.QueuedAt.After(startTime))
-	require.True(t, job.QueuedAt.Before(afterScheduleNow))
-	require.True(t, job.RunAt.After(startTime))
-	require.True(t, job.RunAt.Before(afterScheduleNow))
-	require.True(t, job.NextRunAt.After(startTime))
-	require.True(t, job.NextRunAt.Before(afterScheduleNow))
-	require.EqualValues(t, 0, job.ErrorCount)
+	require.False(t, job.ErrorCount.Valid)
+	require.EqualValues(t, 100, job.Priority)
 	require.False(t, job.LastError.Valid)
+	require.Equal(t, []byte(nil), job.Params)
 
 	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
