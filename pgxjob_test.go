@@ -92,7 +92,7 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
 	require.NoError(t, err)
 
-	err = scheduler.RegisterJobType(pgxjob.JobType{
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
 		Name: "test",
 		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
 			jobRanChan <- struct{}{}
@@ -110,7 +110,7 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 		ID          int64
 		QueueID     int32
 		Priority    int32
-		Type        string
+		TypeID      int32
 		Params      []byte
 		QueuedAt    time.Time
 		RunAt       time.Time
@@ -124,10 +124,14 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	defaultQueueID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_queues where name = 'default'`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
-
 	require.Equal(t, defaultQueueID, job.QueueID)
+
 	require.EqualValues(t, 100, job.Priority)
-	require.Equal(t, "test", job.Type)
+
+	testJobTypeID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_types where name = 'test'`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.Equal(t, testJobTypeID, job.TypeID)
+
 	require.Equal(t, []byte(nil), job.Params)
 	require.True(t, job.QueuedAt.After(startTime))
 	require.True(t, job.QueuedAt.Before(afterScheduleNow))
@@ -178,7 +182,7 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	require.NoError(b, err)
 
 	runJobChan := make(chan struct{}, 100)
-	err = scheduler.RegisterJobType(pgxjob.JobType{
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
 		Name: "test",
 		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
 			runJobChan <- struct{}{}
