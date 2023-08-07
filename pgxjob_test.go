@@ -79,14 +79,20 @@ func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
 }
 
 func TestSchedulerSimpleEndToEnd(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	startTime := time.Now()
 
 	conn := mustConnect(t)
 	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler := pgxjob.NewScheduler()
-	err := scheduler.RegisterJobType(pgxjob.JobType{
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(pgxjob.JobType{
 		Name: "test",
 		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
 			jobRanChan <- struct{}{}
@@ -95,9 +101,6 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
@@ -105,7 +108,7 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	type pgxjobJob struct {
 		ID          int64
-		QueueName   string
+		QueueID     int32
 		Priority    int32
 		Type        string
 		Params      []byte
@@ -119,7 +122,10 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
 
-	require.Equal(t, "default", job.QueueName)
+	defaultQueueID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_queues where name = 'default'`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+
+	require.Equal(t, defaultQueueID, job.QueueID)
 	require.EqualValues(t, 100, job.Priority)
 	require.Equal(t, "test", job.Type)
 	require.Equal(t, []byte(nil), job.Params)
@@ -132,11 +138,8 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	require.EqualValues(t, 0, job.ErrorCount)
 	require.False(t, job.LastError.Valid)
 
-	dbpool := mustNewDBPool(t)
-
 	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
-		GetConnFunc: pgxjob.GetConnFromPoolFunc(dbpool),
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			workerErrChan <- err
 		},
@@ -164,12 +167,18 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 }
 
 func BenchmarkRunBackloggedJobs(b *testing.B) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	conn := mustConnect(b)
 	mustCleanDatabase(b, conn)
+	dbpool := mustNewDBPool(b)
 
-	scheduler := pgxjob.NewScheduler()
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(b, err)
+
 	runJobChan := make(chan struct{}, 100)
-	err := scheduler.RegisterJobType(pgxjob.JobType{
+	err = scheduler.RegisterJobType(pgxjob.JobType{
 		Name: "test",
 		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
 			runJobChan <- struct{}{}
@@ -178,19 +187,13 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	})
 	require.NoError(b, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	for i := 0; i < b.N; i++ {
 		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 		require.NoError(b, err)
 	}
 
-	dbpool := mustNewDBPool(b)
-
 	workerErrChan := make(chan error, 1)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
-		GetConnFunc: pgxjob.GetConnFromPoolFunc(dbpool),
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			select {
 			case workerErrChan <- err:

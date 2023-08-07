@@ -4,6 +4,7 @@ package pgxjob
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -22,16 +23,27 @@ var lockDuration = 1 * time.Minute
 
 // Scheduler is used to schedule jobs and start workers.
 type Scheduler struct {
-	queues        map[string]struct{}
-	jobTypeByName map[string]*JobType
+	getConnFunc     GetConnFunc
+	jobQueuesByName map[string]*JobQueue
+	jobQueuesByID   map[int32]*JobQueue
+	jobTypeByName   map[string]*JobType
 }
 
 // NewScheduler returns a new Scheduler.
-func NewScheduler() *Scheduler {
-	return &Scheduler{
-		queues:        map[string]struct{}{"default": {}},
-		jobTypeByName: make(map[string]*JobType),
+func NewScheduler(ctx context.Context, getConnFunc GetConnFunc) (*Scheduler, error) {
+	s := &Scheduler{
+		getConnFunc:     getConnFunc,
+		jobQueuesByName: map[string]*JobQueue{},
+		jobQueuesByID:   map[int32]*JobQueue{},
+		jobTypeByName:   make(map[string]*JobType),
 	}
+
+	err := s.RegisterJobQueue(ctx, "default")
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }
 
 // JobType is a type of job.
@@ -50,27 +62,48 @@ type JobType struct {
 	RunJob func(ctx context.Context, job *Job) error
 }
 
-// RegisterQueue registers a queue. It must be called before any jobs are scheduled or workers are started.
-func (m *Scheduler) RegisterQueue(queueName string) error {
-	if queueName == "" {
-		return fmt.Errorf("queueName must be set")
-	}
-
-	if _, ok := m.queues[queueName]; ok {
-		return fmt.Errorf("queue with name %s already registered", queueName)
-	}
-
-	m.queues[queueName] = struct{}{}
-
-	return nil
+type JobQueue struct {
+	ID   int32
+	Name string
 }
 
-// MustRegisterQueue calls RegisterQueue and panics if it returns an error.
-func (m *Scheduler) MustRegisterQueue(queueName string) {
-	err := m.RegisterQueue(queueName)
-	if err != nil {
-		panic(err)
+// RegisterJobQueue registers a queue. It must be called before any jobs are scheduled or workers are started.
+func (s *Scheduler) RegisterJobQueue(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("pgxjob: name must be set")
 	}
+
+	if _, ok := s.jobQueuesByName[name]; ok {
+		return fmt.Errorf("pgxjob: queue with name %s already registered", name)
+	}
+
+	conn, release, err := s.getConnFunc(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer release()
+
+	var jobQueueID int32
+	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_queues where name = $1`, name).Scan(&jobQueueID)
+	if errors.Is(selectIDErr, pgx.ErrNoRows) {
+		_, insertErr := conn.Exec(ctx, `insert into pgxjob_queues (name) values ($1) on conflict do nothing`, name)
+		if insertErr != nil {
+			return fmt.Errorf("pgxjob: failed to insert queue %s: %w", name, insertErr)
+		}
+
+		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_queues where name = $1`, name).Scan(&jobQueueID)
+	}
+	if selectIDErr != nil {
+		return fmt.Errorf("pgxjob: failed to select id for queue %s: %w", name, selectIDErr)
+	}
+
+	jq := &JobQueue{
+		ID:   jobQueueID,
+		Name: name,
+	}
+	s.jobQueuesByName[jq.Name] = jq
+	s.jobQueuesByID[jq.ID] = jq
+	return nil
 }
 
 // RegisterJobType registers a job type. It must be called before any jobs are scheduled or workers are started.
@@ -162,7 +195,8 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 		queueName = jobType.DefaultQueue
 	}
 
-	if _, ok := m.queues[queueName]; !ok {
+	jobQueue, ok := m.jobQueuesByName[queueName]
+	if !ok {
 		return fmt.Errorf("pgxjob: queue with name %s not registered", queueName)
 	}
 
@@ -183,8 +217,8 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 
 	batch := &pgx.Batch{}
 	batch.Queue(
-		`insert into pgxjob_jobs (queue_name, priority, type, params, queued_at, run_at, locked_until) values ($1, $2, $3, $4, $5, $6, $7)`,
-		queueName, priority, jobTypeName, jobParams, now, runAt, runAt,
+		`insert into pgxjob_jobs (queue_id, priority, type, params, queued_at, run_at, locked_until) values ($1, $2, $3, $4, $5, $6, $7)`,
+		jobQueue.ID, priority, jobTypeName, jobParams, now, runAt, runAt,
 	)
 	batch.Queue(`select pg_notify($1, null)`, pgChannelName)
 	err := db.SendBatch(ctx, batch).Close()
@@ -209,9 +243,6 @@ func GetConnFromPoolFunc(pool *pgxpool.Pool) GetConnFunc {
 }
 
 type WorkerConfig struct {
-	// GetConnFunc is a function that returns a *pgx.Conn and a release function. It must be set.
-	GetConnFunc GetConnFunc
-
 	// QueueNames is a list of queues to work. If empty all queues are worked.
 	QueueNames []string
 
@@ -230,6 +261,8 @@ type WorkerConfig struct {
 
 type Worker struct {
 	WorkerConfig
+	queueIDs []int32
+
 	scheduler  *Scheduler
 	signalChan chan struct{}
 
@@ -244,15 +277,20 @@ type Worker struct {
 }
 
 func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
-	for _, queueName := range config.QueueNames {
-		_, ok := m.queues[queueName]
-		if !ok {
-			return nil, fmt.Errorf("pgxjob: queue with name %s not registered", queueName)
-		}
-	}
+	var queueIDs []int32
 	if len(config.QueueNames) == 0 {
-		for queueName := range m.queues {
-			config.QueueNames = append(config.QueueNames, queueName)
+		queueIDs = make([]int32, 0, len(m.jobQueuesByID))
+		for _, jq := range m.jobQueuesByName {
+			queueIDs = append(queueIDs, jq.ID)
+		}
+	} else {
+		queueIDs = make([]int32, 0, len(config.QueueNames))
+		for _, queueName := range config.QueueNames {
+			jq, ok := m.jobQueuesByName[queueName]
+			if !ok {
+				return nil, fmt.Errorf("pgxjob: queue with name %s not registered", queueName)
+			}
+			queueIDs = append(queueIDs, jq.ID)
 		}
 	}
 
@@ -266,6 +304,7 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 
 	w := &Worker{
 		WorkerConfig: config,
+		queueIDs:     queueIDs,
 		scheduler:    m,
 		signalChan:   make(chan struct{}, 1),
 		runningJobs:  make(map[int64]*Job, config.MaxConcurrentJobs),
@@ -328,7 +367,7 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 
 type Job struct {
 	ID          int64
-	QueueName   string
+	Queue       *JobQueue
 	Priority    int32
 	Type        *JobType
 	Params      []byte
@@ -340,7 +379,7 @@ type Job struct {
 }
 
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
-// of queue names. $2 is the maximum number of jobs to fetch. $3 is the lock duration.
+// of queue ids. $2 is the maximum number of jobs to fetch. $3 is the lock duration.
 //
 // Exactly how concurrency and locking work with CTEs can be confusing, but the "for update skip locked" is held for the
 // entire statement (actually the lock is held for the entire transaction) per Tom Lane
@@ -349,7 +388,7 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 	select id
 	from pgxjob_jobs
 	where locked_until < now()
-		and queue_name = any($1)
+		and queue_id = any($1)
 	order by priority desc, run_at
 	limit $2
 	for update skip locked
@@ -357,7 +396,7 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 update pgxjob_jobs
 set locked_until = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_name, priority, type, params, queued_at, run_at, locked_until, error_count, last_error`
+returning id, queue_id, priority, type, params, queued_at, run_at, locked_until, error_count, last_error`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
@@ -368,7 +407,7 @@ func (w *Worker) fetchAndStartJobs() error {
 		return nil
 	}
 
-	conn, release, err := w.GetConnFunc(w.cancelCtx)
+	conn, release, err := w.scheduler.getConnFunc(w.cancelCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -376,17 +415,19 @@ func (w *Worker) fetchAndStartJobs() error {
 
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
 		fetchAndLockJobsSQL,
-		[]any{w.QueueNames, availableJobs, lockDuration},
+		[]any{w.queueIDs, availableJobs, lockDuration},
 		func(row pgx.CollectableRow) (*Job, error) {
 			var job Job
+			var jobQueueID int32
 			var jobTypeName string
 			err := row.Scan(
-				&job.ID, &job.QueueName, &job.Priority, &jobTypeName, &job.Params, &job.QueuedAt, &job.RunAt, &job.LockedUntil, &job.ErrorCount, &job.LastError,
+				&job.ID, &jobQueueID, &job.Priority, &jobTypeName, &job.Params, &job.QueuedAt, &job.RunAt, &job.LockedUntil, &job.ErrorCount, &job.LastError,
 			)
 			if err != nil {
 				return nil, err
 			}
 
+			job.Queue = w.scheduler.jobQueuesByID[jobQueueID]
 			job.Type = w.scheduler.jobTypeByName[jobTypeName]
 
 			return &job, nil
@@ -439,7 +480,7 @@ func (w *Worker) recordJobResults(job *Job, jobErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, release, err := w.GetConnFunc(ctx)
+	conn, release, err := w.scheduler.getConnFunc(ctx)
 	if err != nil {
 		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: failed to get connection: %w", job.ID, err))
 	}
