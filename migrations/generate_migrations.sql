@@ -53,7 +53,7 @@ create table pgxjob_jobs (
 	params json, -- use json instead of jsonb as it is faster for insert.
 	queued_at timestamptz not null,
 	run_at timestamptz not null,
-	locked_until timestamptz not null,
+	next_run_at timestamptz not null,
 	error_count integer not null default 0,
 	last_error text
 );$tern_gengen$)

@@ -265,7 +265,7 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 
 	batch := &pgx.Batch{}
 	batch.Queue(
-		`insert into pgxjob_jobs (queue_id, priority, type_id, params, queued_at, run_at, locked_until) values ($1, $2, $3, $4, $5, $6, $7)`,
+		`insert into pgxjob_jobs (queue_id, priority, type_id, params, queued_at, run_at, next_run_at) values ($1, $2, $3, $4, $5, $6, $7)`,
 		jobQueue.ID, priority, jobType.ID, jobParams, now, runAt, runAt,
 	)
 	batch.Queue(`select pg_notify($1, null)`, pgChannelName)
@@ -414,16 +414,16 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 }
 
 type Job struct {
-	ID          int64
-	Queue       *JobQueue
-	Priority    int32
-	Type        *JobType
-	Params      []byte
-	QueuedAt    time.Time
-	RunAt       time.Time
-	LockedUntil time.Time
-	ErrorCount  int32
-	LastError   pgtype.Text
+	ID         int64
+	Queue      *JobQueue
+	Priority   int32
+	Type       *JobType
+	Params     []byte
+	QueuedAt   time.Time
+	RunAt      time.Time
+	NextRunAt  time.Time
+	ErrorCount int32
+	LastError  pgtype.Text
 }
 
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
@@ -435,16 +435,16 @@ type Job struct {
 const fetchAndLockJobsSQL = `with lock_jobs as (
 	select id
 	from pgxjob_jobs
-	where locked_until < now()
+	where next_run_at < now()
 		and queue_id = any($1)
 	order by priority desc, run_at
 	limit $2
 	for update skip locked
 )
 update pgxjob_jobs
-set locked_until = now() + $3
+set next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, priority, type_id, params, queued_at, run_at, locked_until, error_count, last_error`
+returning id, queue_id, priority, type_id, params, queued_at, run_at, next_run_at, error_count, last_error`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
@@ -469,7 +469,7 @@ func (w *Worker) fetchAndStartJobs() error {
 			var jobQueueID int32
 			var jobTypeID int32
 			err := row.Scan(
-				&job.ID, &jobQueueID, &job.Priority, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.LockedUntil, &job.ErrorCount, &job.LastError,
+				&job.ID, &jobQueueID, &job.Priority, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.NextRunAt, &job.ErrorCount, &job.LastError,
 			)
 			if err != nil {
 				return nil, err
@@ -541,7 +541,7 @@ func (w *Worker) recordJobResults(job *Job, jobErr error) {
 		}
 	} else {
 		_, err = pgxutil.ExecRow(ctx, conn,
-			`update pgxjob_jobs set error_count = error_count + 1, last_error = $1, locked_until = 'Infinity' where id = $2`,
+			`update pgxjob_jobs set error_count = error_count + 1, last_error = $1, next_run_at = 'Infinity' where id = $2`,
 			jobErr.Error(), job.ID,
 		)
 		if err != nil {

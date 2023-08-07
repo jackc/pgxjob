@@ -107,16 +107,16 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	afterScheduleNow := time.Now()
 
 	type pgxjobJob struct {
-		ID          int64
-		QueueID     int32
-		Priority    int32
-		TypeID      int32
-		Params      []byte
-		QueuedAt    time.Time
-		RunAt       time.Time
-		LockedUntil time.Time
-		ErrorCount  int32
-		LastError   pgtype.Text
+		ID         int64
+		QueueID    int32
+		Priority   int32
+		TypeID     int32
+		Params     []byte
+		QueuedAt   time.Time
+		RunAt      time.Time
+		NextRunAt  time.Time
+		ErrorCount int32
+		LastError  pgtype.Text
 	}
 
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
@@ -137,8 +137,8 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	require.True(t, job.QueuedAt.Before(afterScheduleNow))
 	require.True(t, job.RunAt.After(startTime))
 	require.True(t, job.RunAt.Before(afterScheduleNow))
-	require.True(t, job.LockedUntil.After(startTime))
-	require.True(t, job.LockedUntil.Before(afterScheduleNow))
+	require.True(t, job.NextRunAt.After(startTime))
+	require.True(t, job.NextRunAt.Before(afterScheduleNow))
 	require.EqualValues(t, 0, job.ErrorCount)
 	require.False(t, job.LastError.Valid)
 
