@@ -423,6 +423,22 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.Equal(t, job.LastError, jobRun.LastError)
 }
 
+func TestUnmarshalParams(t *testing.T) {
+	type T struct {
+		Foo string
+		Bar int
+	}
+
+	fn := pgxjob.UnmarshalParams(func(ctx context.Context, job *pgxjob.Job, params *T) error {
+		require.Equal(t, "foo", params.Foo)
+		require.Equal(t, 123, params.Bar)
+		return nil
+	})
+
+	err := fn(context.Background(), &pgxjob.Job{Params: []byte(`{"foo":"foo","bar":123}`)})
+	require.NoError(t, err)
+}
+
 func TestFilterError(t *testing.T) {
 	var originalError error
 	fn := pgxjob.FilterError(func(ctx context.Context, job *pgxjob.Job) error {
