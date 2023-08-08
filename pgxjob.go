@@ -439,7 +439,7 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 	from pgxjob_jobs
 	where (next_run_at < now() or next_run_at is null)
 		and queue_id = any($1)
-	order by priority desc, run_at
+	order by priority desc, coalesce(next_run_at, queued_at)
 	limit $2
 	for update skip locked
 )
