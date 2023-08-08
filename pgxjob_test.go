@@ -80,6 +80,33 @@ func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
 	require.NoError(t, err)
 }
 
+type pgxjobJob struct {
+	ID         int64
+	QueuedAt   time.Time
+	NextRunAt  pgtype.Timestamptz
+	RunAt      pgtype.Timestamptz
+	QueueID    int32
+	TypeID     int32
+	ErrorCount pgtype.Int4
+	Priority   int16
+	LastError  pgtype.Text
+	Params     []byte
+}
+
+type pgxjobJobRun struct {
+	JobID      int64
+	QueuedAt   time.Time
+	RunAt      time.Time
+	StartedAt  time.Time
+	FinishedAt time.Time
+	RunNumber  int32
+	QueueID    int32
+	TypeID     int32
+	Priority   int16
+	Params     []byte
+	LastError  pgtype.Text
+}
+
 func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -107,19 +134,6 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	afterScheduleNow := time.Now()
-
-	type pgxjobJob struct {
-		ID         int64
-		QueuedAt   time.Time
-		NextRunAt  pgtype.Timestamptz
-		RunAt      pgtype.Timestamptz
-		QueueID    int32
-		TypeID     int32
-		ErrorCount pgtype.Int4
-		Priority   int16
-		LastError  pgtype.Text
-		Params     []byte
-	}
 
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
@@ -171,19 +185,165 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	afterRunNow := time.Now()
 
-	type pgxjobJobRun struct {
-		JobID      int64
-		QueuedAt   time.Time
-		RunAt      time.Time
-		StartedAt  time.Time
-		FinishedAt time.Time
-		RunNumber  int32
-		QueueID    int32
-		TypeID     int32
-		Priority   int16
-		Params     []byte
-		LastError  pgtype.Text
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	require.NoError(t, err)
+
+	require.Equal(t, job.ID, jobRun.JobID)
+	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.StartedAt.After(startTime))
+	require.True(t, jobRun.StartedAt.Before(afterRunNow))
+	require.True(t, jobRun.FinishedAt.After(startTime))
+	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
+	require.EqualValues(t, 1, jobRun.RunNumber)
+	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.TypeID, jobRun.TypeID)
+	require.Equal(t, job.Priority, jobRun.Priority)
+	require.Equal(t, job.Params, jobRun.Params)
+	require.Equal(t, job.LastError, jobRun.LastError)
+}
+
+func TestJobFailedNoRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	jobRanChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
+			return fmt.Errorf("test error")
+		},
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
+	require.NoError(t, err)
+
+	workerErrChan := make(chan error)
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			workerErrChan <- err
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	select {
+	case <-jobRanChan:
+	case err := <-workerErrChan:
+		t.Fatalf("workerErrChan: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for job to run")
 	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	afterRunNow := time.Now()
+
+	_, err = pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs where id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJob])
+	require.Error(t, err)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	require.NoError(t, err)
+
+	require.Equal(t, job.ID, jobRun.JobID)
+	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.StartedAt.After(startTime))
+	require.True(t, jobRun.StartedAt.Before(afterRunNow))
+	require.True(t, jobRun.FinishedAt.After(startTime))
+	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
+	require.EqualValues(t, 1, jobRun.RunNumber)
+	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.TypeID, jobRun.TypeID)
+	require.Equal(t, job.Priority, jobRun.Priority)
+	require.Equal(t, job.Params, jobRun.Params)
+	require.Equal(t, "test error", jobRun.LastError.String)
+}
+
+func TestJobFailedErrorWithRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	jobRanChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	retryAt := time.Now().Add(1 * time.Hour)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
+			return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("test error"), RetryAt: retryAt}
+		},
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	workerErrChan := make(chan error)
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			workerErrChan <- err
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	select {
+	case <-jobRanChan:
+	case err := <-workerErrChan:
+		t.Fatalf("workerErrChan: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for job to run")
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	afterRunNow := time.Now()
+
+	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, job.ErrorCount.Int32)
+	require.Equal(t, "test error", job.LastError.String)
 
 	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
 	require.NoError(t, err)

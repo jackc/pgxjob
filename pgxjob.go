@@ -553,11 +553,27 @@ values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		}
 	} else {
 		_, err = pgxutil.ExecRow(ctx, conn,
-			`update pgxjob_jobs set error_count = error_count + 1, last_error = $1, next_run_at = 'Infinity' where id = $2`,
-			jobErr.Error(), job.ID,
-		)
+			`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, priority, params, error)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			job.ID, job.QueuedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Queue.ID, job.Type.ID, job.Priority, job.Params, jobErr.Error())
 		if err != nil {
 			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+		}
+
+		var errorWithRetry *ErrorWithRetry
+		if errors.As(jobErr, &errorWithRetry) {
+			_, err = pgxutil.ExecRow(ctx, conn,
+				`update pgxjob_jobs set error_count = $1, last_error = $2, next_run_at = $3 where id = $4`,
+				job.ErrorCount+1, errorWithRetry.Err.Error(), errorWithRetry.RetryAt, job.ID,
+			)
+			if err != nil {
+				w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+			}
+		} else {
+			_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
+			if err != nil {
+				w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+			}
 		}
 	}
 }
@@ -574,4 +590,13 @@ func (w *Worker) Signal() {
 	case w.signalChan <- struct{}{}:
 	default:
 	}
+}
+
+type ErrorWithRetry struct {
+	Err     error
+	RetryAt time.Time
+}
+
+func (e *ErrorWithRetry) Error() string {
+	return e.Err.Error()
 }
