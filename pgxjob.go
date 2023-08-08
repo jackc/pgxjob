@@ -191,8 +191,8 @@ func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeP
 
 type RunJobFunc func(ctx context.Context, job *Job) error
 
-// RunJobParsed is a convenience function for creating a JobType.RunJob function that parses the params into a T.
-func RunJobParsed[T any](fn func(ctx context.Context, job *Job, params *T) error) RunJobFunc {
+// UnmarshalParams returns a JobType.RunJob function that unmarshals job.Params into a T and calls fn.
+func UnmarshalParams[T any](fn func(ctx context.Context, job *Job, params *T) error) RunJobFunc {
 	return func(ctx context.Context, job *Job) error {
 		var params T
 		err := json.Unmarshal(job.Params, &params)
@@ -616,4 +616,42 @@ func (e *ErrorWithRetry) Error() string {
 
 func (e *ErrorWithRetry) Unwrap() error {
 	return e.Err
+}
+
+// FilterError returns a RunJobFunc that calls runJob. If runJob returns an error then it calls filterError and returns
+// its error. filterError is typically used to determine if the error should be retried or not.
+func FilterError(runJob RunJobFunc, filterError func(job *Job, jobErr error) error) RunJobFunc {
+	return func(ctx context.Context, job *Job) error {
+		jobErr := runJob(ctx, job)
+		if jobErr != nil {
+			return filterError(job, jobErr)
+		}
+
+		return nil
+	}
+}
+
+// RetryLinearBackoff returns a RunJobFunc that calls runJob. If runJob returns an error then maxRetries and baseDelay
+// are used to when and whether to retry the job. If the error is already an ErrorWithRetry then it is returned
+// unmodified.
+//
+// e.g. If maxRetries is 3 and baseDelay is 1 minutes then the job will be retried after 1 minute, then after an
+// additional 2 minutes, and finally after an additional 3 minutes. That is, the last retry will take occur 6 minutes
+// after the first failure.
+func RetryLinearBackoff(runJob RunJobFunc, maxRetries int32, baseDelay time.Duration) RunJobFunc {
+	return FilterError(runJob, func(job *Job, jobErr error) error {
+		if job.ErrorCount >= maxRetries {
+			return jobErr
+		}
+
+		var errorWithRetry *ErrorWithRetry
+		if errors.As(jobErr, &errorWithRetry) {
+			return jobErr
+		}
+
+		return &ErrorWithRetry{
+			Err:     jobErr,
+			RetryAt: time.Now().Add(time.Duration(job.ErrorCount+1) * baseDelay),
+		}
+	})
 }

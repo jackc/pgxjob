@@ -2,6 +2,7 @@ package pgxjob_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -420,6 +421,62 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.Equal(t, job.Priority, jobRun.Priority)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
+}
+
+func TestFilterError(t *testing.T) {
+	var originalError error
+	fn := pgxjob.FilterError(func(ctx context.Context, job *pgxjob.Job) error {
+		return originalError
+	}, func(job *pgxjob.Job, jobErr error) error {
+		return fmt.Errorf("filtered error")
+	})
+
+	err := fn(context.Background(), nil)
+	require.NoError(t, err)
+
+	originalError = fmt.Errorf("original error")
+	err = fn(context.Background(), nil)
+	require.EqualError(t, err, "filtered error")
+}
+
+func TestRetryLinearBackoff(t *testing.T) {
+	var originalError error
+	fn := pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+		return originalError
+	}, 3, 1*time.Hour)
+
+	for i, tt := range []struct {
+		originalError error
+		errorCount    int32
+		retryDelay    time.Duration
+	}{
+		{nil, 0, 0},
+		{fmt.Errorf("original error"), 0, 1 * time.Hour},
+		{fmt.Errorf("original error"), 1, 2 * time.Hour},
+		{fmt.Errorf("original error"), 2, 3 * time.Hour},
+		{fmt.Errorf("original error"), 3, 0},
+	} {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			originalError = tt.originalError
+			job := &pgxjob.Job{ErrorCount: tt.errorCount}
+			earliestRetryTime := time.Now().Add(tt.retryDelay)
+			err := fn(context.Background(), job)
+			latestRetryTime := time.Now().Add(tt.retryDelay)
+			if originalError == nil {
+				require.NoError(t, err)
+			} else {
+				var errorWithRetry *pgxjob.ErrorWithRetry
+				if tt.retryDelay == 0 {
+					require.False(t, errors.As(err, &errorWithRetry))
+				} else {
+					require.EqualError(t, err, "original error")
+					require.ErrorAs(t, err, &errorWithRetry)
+					require.Truef(t, errorWithRetry.RetryAt.After(earliestRetryTime), "RetryAt: %v, earliestRetryTime: %v", errorWithRetry.RetryAt, earliestRetryTime)
+					require.Truef(t, errorWithRetry.RetryAt.Before(latestRetryTime), "RetryAt: %v, latestRetryTime: %v", errorWithRetry.RetryAt, latestRetryTime)
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkRunBackloggedJobs(b *testing.B) {
