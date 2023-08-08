@@ -12,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgxutil"
 )
@@ -426,7 +425,7 @@ type Job struct {
 	QueuedAt   time.Time
 	RunAt      time.Time
 	ErrorCount int32
-	LastError  pgtype.Text
+	LastError  string
 }
 
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
@@ -448,7 +447,7 @@ update pgxjob_jobs
 set run_at = coalesce(run_at, queued_at),
 	next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, priority, type_id, params, queued_at, run_at, coalesce(error_count, 0), last_error`
+returning id, queue_id, priority, type_id, params, queued_at, run_at, coalesce(error_count, 0), coalesce(last_error, '')`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
