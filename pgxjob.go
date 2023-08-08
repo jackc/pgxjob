@@ -419,13 +419,13 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 type Job struct {
 	ID         int64
 	Queue      *JobQueue
-	Priority   int16
 	Type       *JobType
 	Params     []byte
 	QueuedAt   time.Time
 	RunAt      time.Time
-	ErrorCount int32
 	LastError  string
+	ErrorCount int32
+	Priority   int16
 }
 
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
@@ -447,7 +447,7 @@ update pgxjob_jobs
 set run_at = coalesce(run_at, queued_at),
 	next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, priority, type_id, params, queued_at, run_at, coalesce(error_count, 0), coalesce(last_error, '')`
+returning id, queue_id, type_id, params, queued_at, run_at, coalesce(last_error, ''), coalesce(error_count, 0), priority`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
@@ -472,7 +472,7 @@ func (w *Worker) fetchAndStartJobs() error {
 			var jobQueueID int32
 			var jobTypeID int32
 			err := row.Scan(
-				&job.ID, &jobQueueID, &job.Priority, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.ErrorCount, &job.LastError,
+				&job.ID, &jobQueueID, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.LastError, &job.ErrorCount, &job.Priority,
 			)
 			if err != nil {
 				return nil, err
