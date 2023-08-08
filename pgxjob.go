@@ -125,7 +125,7 @@ type RegisterJobTypeParams struct {
 	DefaultPriority int16
 
 	// RunJob is the function that will be called when a job of this type is run. It must be set.
-	RunJob func(ctx context.Context, job *Job) error
+	RunJob RunJobFunc
 }
 
 // RegisterJobType registers a job type. It must be called before any jobs are scheduled or workers are started.
@@ -189,8 +189,10 @@ func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeP
 	return nil
 }
 
-// RunJobFunc is a convenience function for creating a JobType.RunJob function that parses the params into a T.
-func RunJobFunc[T any](fn func(ctx context.Context, job *Job, params *T) error) func(ctx context.Context, job *Job) error {
+type RunJobFunc func(ctx context.Context, job *Job) error
+
+// RunJobParsed is a convenience function for creating a JobType.RunJob function that parses the params into a T.
+func RunJobParsed[T any](fn func(ctx context.Context, job *Job, params *T) error) RunJobFunc {
 	return func(ctx context.Context, job *Job) error {
 		var params T
 		err := json.Unmarshal(job.Params, &params)
