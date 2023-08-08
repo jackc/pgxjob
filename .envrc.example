@@ -1,2 +1,5 @@
+export POSTGRESQL_DATA_DIR=.dev/postgresql
+export PGPORT=5019
+export PGUSER=postgres
 export PGDATABASE=pgxjob_test
 export PGXJOB_TEST_DATABASE=pgxjob_test
