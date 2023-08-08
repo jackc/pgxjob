@@ -63,6 +63,26 @@ create table pgxjob_jobs (
 	priority smallint not null,
 	last_error text,
 	params json -- use json instead of jsonb as it is faster for insert.
+);
+
+create table pgxjob_job_runs (
+	job_id bigint not null, -- no foreign key because original jobs will be deleted
+	queued_at timestamptz not null,
+	run_at timestamptz not null,
+
+	-- not using tstzrange because jobs which take less than a microsecond may have the same value for started_at and
+	-- finished_at because PostgreSQL only has microsecond level precision. A [) range where both ends have the same value
+	-- is "empty". This special value would lose the time that the job actually ran.
+	started_at timestamptz not null,
+	finished_at timestamptz not null,
+
+	run_number int not null,
+	queue_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_queues rows are never deleted.
+	type_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_types rows are never deleted.
+	priority smallint not null,
+	params json,
+	error text,
+	primary key (job_id, run_number)
 );$tern_gengen$)
 
 )

@@ -76,6 +76,8 @@ func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
 	defer cancel()
 	_, err := conn.Exec(ctx, `delete from pgxjob_jobs`)
 	require.NoError(t, err)
+	_, err = conn.Exec(ctx, `delete from pgxjob_job_runs`)
+	require.NoError(t, err)
 }
 
 func TestSchedulerSimpleEndToEnd(t *testing.T) {
@@ -166,6 +168,39 @@ func TestSchedulerSimpleEndToEnd(t *testing.T) {
 
 	err = <-startErrChan
 	require.NoError(t, err)
+
+	afterRunNow := time.Now()
+
+	type pgxjobJobRun struct {
+		JobID      int64
+		QueuedAt   time.Time
+		RunAt      time.Time
+		StartedAt  time.Time
+		FinishedAt time.Time
+		RunNumber  int32
+		QueueID    int32
+		TypeID     int32
+		Priority   int16
+		Params     []byte
+		LastError  pgtype.Text
+	}
+
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	require.NoError(t, err)
+
+	require.Equal(t, job.ID, jobRun.JobID)
+	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.StartedAt.After(startTime))
+	require.True(t, jobRun.StartedAt.Before(afterRunNow))
+	require.True(t, jobRun.FinishedAt.After(startTime))
+	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
+	require.EqualValues(t, 1, jobRun.RunNumber)
+	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.TypeID, jobRun.TypeID)
+	require.Equal(t, job.Priority, jobRun.Priority)
+	require.Equal(t, job.Params, jobRun.Params)
+	require.Equal(t, job.LastError, jobRun.LastError)
 }
 
 func BenchmarkRunBackloggedJobs(b *testing.B) {

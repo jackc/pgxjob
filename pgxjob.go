@@ -418,12 +418,11 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 type Job struct {
 	ID         int64
 	Queue      *JobQueue
-	Priority   int32
+	Priority   int16
 	Type       *JobType
 	Params     []byte
 	QueuedAt   time.Time
 	RunAt      time.Time
-	NextRunAt  time.Time
 	ErrorCount int32
 	LastError  pgtype.Text
 }
@@ -444,9 +443,10 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 	for update skip locked
 )
 update pgxjob_jobs
-set next_run_at = now() + $3
+set run_at = coalesce(run_at, queued_at),
+	next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, priority, type_id, params, queued_at, coalesce(run_at, next_run_at, queued_at), coalesce(next_run_at, queued_at), coalesce(error_count, 0), last_error`
+returning id, queue_id, priority, type_id, params, queued_at, run_at, coalesce(error_count, 0), last_error`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
@@ -471,7 +471,7 @@ func (w *Worker) fetchAndStartJobs() error {
 			var jobQueueID int32
 			var jobTypeID int32
 			err := row.Scan(
-				&job.ID, &jobQueueID, &job.Priority, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.NextRunAt, &job.ErrorCount, &job.LastError,
+				&job.ID, &jobQueueID, &job.Priority, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.ErrorCount, &job.LastError,
 			)
 			if err != nil {
 				return nil, err
@@ -502,6 +502,7 @@ func (w *Worker) startJob(job *Job) {
 	go func(job *Job) {
 		defer w.jobWaitGroup.Done()
 
+		startedAt := time.Now()
 		var err error
 		func() {
 			defer func() {
@@ -512,14 +513,15 @@ func (w *Worker) startJob(job *Job) {
 			}()
 			err = job.Type.RunJob(w.cancelCtx, job)
 		}()
-		w.recordJobResults(job, err)
+		finishedAt := time.Now()
+		w.recordJobResults(job, startedAt, finishedAt, err)
 
 	}(job)
 }
 
 // recordJobResults records the results of running a job. It does not take a context because it should still execute
 // even if the context that controls the overall Worker.Run is cancelled.
-func (w *Worker) recordJobResults(job *Job, jobErr error) {
+func (w *Worker) recordJobResults(job *Job, startedAt, finishedAt time.Time, jobErr error) {
 	defer func() {
 		w.mux.Lock()
 		delete(w.runningJobs, job.ID)
@@ -538,6 +540,14 @@ func (w *Worker) recordJobResults(job *Job, jobErr error) {
 
 	if jobErr == nil {
 		_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
+		}
+
+		_, err = pgxutil.ExecRow(ctx, conn,
+			`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, priority, params)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			job.ID, job.QueuedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Queue.ID, job.Type.ID, job.Priority, job.Params)
 		if err != nil {
 			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
 		}
