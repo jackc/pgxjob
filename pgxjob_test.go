@@ -108,7 +108,7 @@ type pgxjobJobRun struct {
 	LastError  pgtype.Text
 }
 
-func TestSchedulerSimpleEndToEnd(t *testing.T) {
+func TestSimpleEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -421,6 +421,71 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.Equal(t, job.Priority, jobRun.Priority)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
+}
+
+func TestWorkerRunsBacklog(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	jobRanChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	backlogCount := 10000
+	for i := 0; i < backlogCount; i++ {
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(t, err)
+	}
+
+	workerErrChan := make(chan error)
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			workerErrChan <- err
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	for i := 0; i < backlogCount; i++ {
+		select {
+		case <-jobRanChan:
+		case err := <-workerErrChan:
+			t.Fatalf("workerErrChan: %v", err)
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for job to run")
+		}
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	jobsStillQueued, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_jobs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, jobsStillQueued)
+
+	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, backlogCount, jobsRun)
 }
 
 func TestUnmarshalParams(t *testing.T) {
