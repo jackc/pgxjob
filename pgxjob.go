@@ -613,3 +613,7 @@ type ErrorWithRetry struct {
 func (e *ErrorWithRetry) Error() string {
 	return e.Err.Error()
 }
+
+func (e *ErrorWithRetry) Unwrap() error {
+	return e.Err
+}
