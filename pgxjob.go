@@ -478,7 +478,18 @@ func (w *Worker) fetchAndStartJobs() error {
 			}
 
 			job.Queue = w.scheduler.jobQueuesByID[jobQueueID]
-			job.Type = w.scheduler.jobTypesByID[jobTypeID]
+			if jobType, ok := w.scheduler.jobTypesByID[jobTypeID]; ok {
+				job.Type = jobType
+			} else {
+				// This should never happen because job types are created and never deleted. But if somehow it does happen then
+				// create a fake JobType with a RunJob that returns an error.
+				job.Type = &JobType{
+					ID: jobTypeID,
+					RunJob: func(ctx context.Context, job *Job) error {
+						return fmt.Errorf("pgxjob: job type with id %d not registered", jobTypeID)
+					},
+				}
+			}
 
 			return &job, nil
 		},

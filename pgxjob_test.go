@@ -283,6 +283,65 @@ func TestJobFailedNoRetry(t *testing.T) {
 	require.Equal(t, "test error", jobRun.LastError.String)
 }
 
+func TestUnknownJobType(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	workerErrChan := make(chan error)
+	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			workerErrChan <- err
+		},
+	})
+	require.NoError(t, err)
+
+	err = pgxutil.InsertRow(ctx, conn, "pgxjob_jobs", map[string]any{
+		"queued_at": time.Now(),
+		"queue_id":  1,  // 1 should always be the default queue
+		"type_id":   -1, // -1 should never exist
+		"priority":  0,
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		n, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_jobs`, nil, pgx.RowTo[int32])
+		require.NoError(t, err)
+		return n == 0
+	}, 5*time.Second, 100*time.Millisecond)
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[pgxjobJobRun])
+	require.NoError(t, err)
+
+	require.EqualValues(t, 1, jobRun.RunNumber)
+	require.Equal(t, "pgxjob: job type with id -1 not registered", jobRun.LastError.String)
+}
+
 func TestJobFailedErrorWithRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
