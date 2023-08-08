@@ -303,6 +303,14 @@ type WorkerConfig struct {
 	// PollInterval is the interval between polling for new jobs. If not set 10 seconds is used.
 	PollInterval time.Duration
 
+	// MaxBufferedJobResults is the maximum number of job results that can be buffered before the job results must be
+	// flushed to the database. If not set 100 is used.
+	MaxBufferedJobResults int
+
+	// MaxBufferedJobResultAge is the maximum age of a buffered job result before the job results must be flushed to the
+	// database. If not set 1 second is used.
+	MaxBufferedJobResultAge time.Duration
+
 	// HandleWorkerError is a function that is called when the worker encounters an error there is nothing that can be
 	// done within the worker. For example, a network outage may cause the worker to be unable to fetch a job or record
 	// the outcome of an execution. The Worker.Run execution should not be stopped because of this. Instead, it should try
@@ -325,6 +333,9 @@ type Worker struct {
 	running     bool
 
 	jobWaitGroup sync.WaitGroup
+
+	jobResultsChan          chan *jobResult
+	flushJobResultsDoneChan chan struct{}
 }
 
 func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
@@ -353,12 +364,21 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 		config.PollInterval = 10 * time.Second
 	}
 
+	if config.MaxBufferedJobResults == 0 {
+		config.MaxBufferedJobResults = 100
+	}
+
+	if config.MaxBufferedJobResultAge == 0 {
+		config.MaxBufferedJobResultAge = 1 * time.Second
+	}
+
 	w := &Worker{
-		WorkerConfig: config,
-		queueIDs:     queueIDs,
-		scheduler:    m,
-		signalChan:   make(chan struct{}, 1),
-		runningJobs:  make(map[int64]*Job, config.MaxConcurrentJobs),
+		WorkerConfig:   config,
+		queueIDs:       queueIDs,
+		scheduler:      m,
+		signalChan:     make(chan struct{}, 1),
+		runningJobs:    make(map[int64]*Job, config.MaxConcurrentJobs),
+		jobResultsChan: make(chan *jobResult),
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
 
@@ -372,6 +392,9 @@ func (w *Worker) Start() error {
 		w.mux.Unlock()
 		return fmt.Errorf("pgxjob: worker already running")
 	}
+	w.running = true
+	w.flushJobResultsDoneChan = make(chan struct{})
+	go w.flushJobResults()
 	w.mux.Unlock()
 
 	for {
@@ -397,6 +420,70 @@ func (w *Worker) Start() error {
 
 }
 
+func (w *Worker) flushJobResults() {
+	defer close(w.flushJobResultsDoneChan)
+
+	jobResults := make([]*jobResult, 0, w.MaxBufferedJobResults)
+	flushTimer := time.NewTimer(time.Hour)
+	flushTimer.Stop()
+
+	flush := func() {
+		if !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		for _, jobResult := range jobResults {
+			w.recordJobResults(jobResult.job, jobResult.startTime, jobResult.finishedAt, jobResult.err)
+		}
+
+		clear(jobResults)
+		jobResults = jobResults[:0]
+	}
+
+	defer flush()
+
+	appendJobResult := func(jobResult *jobResult) {
+		jobResults = append(jobResults, jobResult)
+		if len(jobResults) >= w.MaxBufferedJobResults {
+			flush()
+		} else if len(jobResults) == 1 {
+			flushTimer.Reset(w.MaxBufferedJobResultAge)
+		}
+	}
+
+loop1:
+	for {
+		select {
+		case <-w.cancelCtx.Done():
+			break loop1
+		case jobResult := <-w.jobResultsChan:
+			appendJobResult(jobResult)
+		case <-flushTimer.C:
+			flush()
+		}
+	}
+
+	doneChan := make(chan struct{})
+	go func() {
+		w.jobWaitGroup.Wait()
+		close(doneChan)
+	}()
+
+loop2:
+	for {
+		select {
+		case <-doneChan:
+			break loop2
+		case jobResult := <-w.jobResultsChan:
+			appendJobResult(jobResult)
+		case <-flushTimer.C:
+			flush()
+		}
+	}
+}
+
 // Shutdown stops the worker. It waits for all jobs to finish before returning. Cancel ctx to force shutdown without
 // waiting for jobs to finish.
 func (w *Worker) Shutdown(ctx context.Context) error {
@@ -405,6 +492,7 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 	doneChan := make(chan struct{})
 	go func() {
 		w.jobWaitGroup.Wait()
+		<-w.flushJobResultsDoneChan
 		close(doneChan)
 	}()
 
@@ -426,6 +514,13 @@ type Job struct {
 	LastError  string
 	ErrorCount int32
 	Priority   int16
+}
+
+type jobResult struct {
+	job        *Job
+	startTime  time.Time
+	finishedAt time.Time
+	err        error
 }
 
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
@@ -526,21 +621,17 @@ func (w *Worker) startJob(job *Job) {
 			err = job.Type.RunJob(w.cancelCtx, job)
 		}()
 		finishedAt := time.Now()
-		w.recordJobResults(job, startedAt, finishedAt, err)
-
+		w.mux.Lock()
+		delete(w.runningJobs, job.ID)
+		w.mux.Unlock()
+		w.Signal()
+		w.jobResultsChan <- &jobResult{job, startedAt, finishedAt, err}
 	}(job)
 }
 
 // recordJobResults records the results of running a job. It does not take a context because it should still execute
 // even if the context that controls the overall Worker.Run is cancelled.
 func (w *Worker) recordJobResults(job *Job, startedAt, finishedAt time.Time, jobErr error) {
-	defer func() {
-		w.mux.Lock()
-		delete(w.runningJobs, job.ID)
-		w.mux.Unlock()
-		w.Signal()
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
