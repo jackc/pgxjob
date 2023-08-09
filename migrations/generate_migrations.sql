@@ -47,7 +47,7 @@ create table pgxjob_types (
 
 create table pgxjob_workers (
 	id int primary key,
-	created_at timestamptz not null default now(),
+	inserted_at timestamptz not null default now(),
 	heartbeat timestamptz not null
 );
 
@@ -75,7 +75,7 @@ create table pgxjob_jobs (
 
 create table pgxjob_job_runs (
 	job_id bigint not null, -- no foreign key because original jobs will be deleted
-	inserted_at timestamptz not null,
+	job_inserted_at timestamptz not null,
 	run_at timestamptz not null,
 
 	-- not using tstzrange because jobs which take less than a microsecond may have the same value for started_at and

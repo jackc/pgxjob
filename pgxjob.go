@@ -552,7 +552,7 @@ func (w *Worker) writeJobResults() {
 		if len(pgxjobJobRunsToInsert) < jobsRunCopyThreshhold {
 			for _, jobRun := range pgxjobJobRunsToInsert {
 				batch.Queue(
-					`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params, error) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+					`insert into pgxjob_job_runs (job_id, job_inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params, error) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 					jobRun.JobID, jobRun.InsertedAt, jobRun.RunAt, jobRun.StartedAt, jobRun.FinishedAt, jobRun.RunNumber, jobRun.GroupID, jobRun.TypeID, jobRun.Params, jobRun.Error,
 				)
 			}
@@ -585,7 +585,7 @@ func (w *Worker) writeJobResults() {
 			_, err = conn.CopyFrom(
 				ctx,
 				pgx.Identifier{"pgxjob_job_runs"},
-				[]string{"job_id", "inserted_at", "run_at", "started_at", "finished_at", "run_number", "group_id", "type_id", "params", "error"},
+				[]string{"job_id", "job_inserted_at", "run_at", "started_at", "finished_at", "run_number", "group_id", "type_id", "params", "error"},
 				pgx.CopyFromSlice(len(pgxjobJobRunsToInsert), func(i int) ([]any, error) {
 					row := &pgxjobJobRunsToInsert[i]
 					return []any{row.JobID, row.InsertedAt, row.RunAt, row.StartedAt, row.FinishedAt, row.RunNumber, row.GroupID, row.TypeID, row.Params, row.Error}, nil
