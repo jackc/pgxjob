@@ -89,7 +89,6 @@ type pgxjobJob struct {
 	QueueID    int32
 	TypeID     int32
 	ErrorCount pgtype.Int4
-	Priority   int16
 	LastError  pgtype.Text
 	Params     []byte
 }
@@ -103,7 +102,6 @@ type pgxjobJobRun struct {
 	RunNumber  int32
 	QueueID    int32
 	TypeID     int32
-	Priority   int16
 	Params     []byte
 	LastError  pgtype.Text
 }
@@ -153,7 +151,6 @@ func TestSimpleEndToEnd(t *testing.T) {
 	require.Equal(t, testJobTypeID, job.TypeID)
 
 	require.False(t, job.ErrorCount.Valid)
-	require.EqualValues(t, 100, job.Priority)
 	require.False(t, job.LastError.Valid)
 	require.Equal(t, []byte(nil), job.Params)
 
@@ -196,7 +193,6 @@ func TestSimpleEndToEnd(t *testing.T) {
 	require.EqualValues(t, 1, jobRun.RunNumber)
 	require.Equal(t, job.QueueID, jobRun.QueueID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
-	require.Equal(t, job.Priority, jobRun.Priority)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
 }
@@ -273,7 +269,6 @@ func TestJobFailedNoRetry(t *testing.T) {
 	require.EqualValues(t, 1, jobRun.RunNumber)
 	require.Equal(t, job.QueueID, jobRun.QueueID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
-	require.Equal(t, job.Priority, jobRun.Priority)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, "test error", jobRun.LastError.String)
 }
@@ -308,7 +303,6 @@ func TestUnknownJobType(t *testing.T) {
 		"queued_at": time.Now(),
 		"queue_id":  1,  // 1 should always be the default queue
 		"type_id":   -1, // -1 should never exist
-		"priority":  0,
 	})
 	require.NoError(t, err)
 
@@ -408,7 +402,6 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.EqualValues(t, 1, jobRun.RunNumber)
 	require.Equal(t, job.QueueID, jobRun.QueueID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
-	require.Equal(t, job.Priority, jobRun.Priority)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
 }

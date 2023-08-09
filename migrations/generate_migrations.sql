@@ -60,7 +60,6 @@ create table pgxjob_jobs (
 	queue_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_queues rows are never deleted.
 	type_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_types rows are never deleted.
 	error_count int, -- if null then error_count = 0. This saves 4 bytes in the common case that the job hasn't errored.
-	priority smallint not null,
 	last_error text,
 	params json -- use json instead of jsonb as it is faster for insert.
 );
@@ -79,7 +78,6 @@ create table pgxjob_job_runs (
 	run_number int not null,
 	queue_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_queues rows are never deleted.
 	type_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_types rows are never deleted.
-	priority smallint not null,
 	params json,
 	error text,
 	primary key (job_id, run_number)
