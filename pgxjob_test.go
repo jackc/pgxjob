@@ -296,6 +296,90 @@ func TestRunAtEndToEnd(t *testing.T) {
 	require.False(t, jobRun.LastError.Valid)
 }
 
+func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	jobRanChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	totalJobs := 0
+
+	// Schedule an ASAP job before the worker has started.
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+	totalJobs++
+
+	// Schedule a Run At job before the worker has started.
+	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(500 * time.Millisecond)})
+	require.NoError(t, err)
+	totalJobs++
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		PollInterval: 50 * time.Millisecond,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(10 * time.Millisecond)
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(t, err)
+		totalJobs++
+
+		err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(500 * time.Millisecond)})
+		require.NoError(t, err)
+		totalJobs++
+	}
+
+	for i := 0; i < totalJobs; i++ {
+		select {
+		case <-jobRanChan:
+		case <-time.After(30 * time.Second):
+			t.Fatal("timed out waiting for job to run")
+		}
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	pendingASAPJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_asap_jobs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, pendingASAPJobsCount)
+
+	pendingRunAtJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_run_at_jobs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, pendingRunAtJobsCount)
+
+	jobRunsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, totalJobs, jobRunsCount)
+}
+
 func TestJobFailedNoRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
