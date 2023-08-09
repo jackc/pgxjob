@@ -154,7 +154,7 @@ func TestSimpleEndToEnd(t *testing.T) {
 	require.False(t, job.LastError.Valid)
 	require.Equal(t, []byte(nil), job.Params)
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -226,7 +226,7 @@ func TestJobFailedNoRetry(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -292,7 +292,7 @@ func TestUnknownJobType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -358,7 +358,7 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -433,7 +433,7 @@ func TestWorkerRunsBacklog(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -466,6 +466,56 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
 	require.EqualValues(t, backlogCount, jobsRun)
+}
+
+func TestWorkerHeartbeatBeats(t *testing.T) {
+	pgxjob.SetMinWorkerHeartbeatDelayForTest(t, 50*time.Millisecond)
+	pgxjob.SetWorkerHeartbeatDelayJitterForTest(t, 50*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	firstHeartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		heartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
+		require.NoError(t, err)
+		return heartbeat.After(firstHeartbeat)
+	}, 5*time.Second, 100*time.Millisecond)
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
 }
 
 func TestUnmarshalParams(t *testing.T) {
@@ -566,7 +616,7 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 		require.NoError(b, err)
 	}
 
-	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			b.Errorf("worker error: %v", err)
 		},

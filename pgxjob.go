@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -21,6 +22,10 @@ const pgChannelName = "pgxjob_jobs"
 const defaultGroupName = "default"
 
 var lockDuration = 1 * time.Minute
+
+var minWorkerHeartbeatDelay = 45 * time.Second
+var workerHeartbeatDelayJitter = 30 * time.Second
+var workerDeadWithoutHeartbeatDuration = 5 * (minWorkerHeartbeatDelay + workerHeartbeatDelayJitter)
 
 // Scheduler is used to schedule jobs and start workers.
 type Scheduler struct {
@@ -302,6 +307,8 @@ type WorkerConfig struct {
 }
 
 type Worker struct {
+	ID int32
+
 	WorkerConfig
 	groupID int32
 
@@ -322,7 +329,7 @@ type Worker struct {
 	writeJobResultsDoneChan chan struct{}
 }
 
-func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
+func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 	if config.GroupName == "" {
 		config.GroupName = defaultGroupName
 	}
@@ -352,7 +359,22 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 		config.MaxBufferedJobResultAge = 1 * time.Second
 	}
 
+	conn, release, err := m.getConnFunc(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pgxjob: failed to get connection: %w", err)
+	}
+	defer release()
+	workerID, err := pgxutil.SelectRow(ctx, conn,
+		`insert into pgxjob_workers (heartbeat) values (now()) returning id`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pgxjob: failed to insert into pgxjob_workers: %w", err)
+	}
+
 	w := &Worker{
+		ID:             workerID,
 		WorkerConfig:   config,
 		groupID:        groupID,
 		scheduler:      m,
@@ -373,11 +395,59 @@ func (w *Worker) Start() error {
 		return fmt.Errorf("pgxjob: worker already running")
 	}
 	w.running = true
-	w.writeJobResultsDoneChan = make(chan struct{})
-	go w.writeJobResults()
 	w.mux.Unlock()
 
+	go w.heartbeat()
+
+	w.writeJobResultsDoneChan = make(chan struct{})
+	go w.writeJobResults()
+
 	return w.fetchAndStartJobs()
+}
+
+func (w *Worker) heartbeat() {
+	for {
+		select {
+		case <-w.cancelCtx.Done():
+			return
+		case <-time.After(minWorkerHeartbeatDelay + time.Duration(rand.Int63n(int64(workerHeartbeatDelayJitter)))):
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						w.handleWorkerError(fmt.Errorf("pgxjob: panic in heartbeat for %d: %v\n%s", w.ID, r, debug.Stack()))
+					}
+				}()
+
+				err := func() error {
+					ctx, cancel := context.WithTimeout(w.cancelCtx, 15*time.Second)
+					defer cancel()
+
+					conn, release, err := w.scheduler.getConnFunc(ctx)
+					if err != nil {
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to get connection: %w", w.ID, err)
+					}
+					defer release()
+
+					_, err = conn.Exec(ctx, `update pgxjob_workers set heartbeat = now() where id = $1`, w.ID)
+					if err != nil {
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to update: %w", w.ID, err)
+					}
+
+					_, err = conn.Exec(ctx, `with t as (
+	delete from pgxjob_workers where heartbeat + $1 < now() returning id
+				) select * from t`, workerDeadWithoutHeartbeatDuration)
+					if err != nil {
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.ID, err)
+					}
+
+					return nil
+				}()
+				if err != nil {
+					w.handleWorkerError(err)
+				}
+			}()
+		}
+	}
 }
 
 func (w *Worker) writeJobResults() {

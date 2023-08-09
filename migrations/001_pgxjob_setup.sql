@@ -8,6 +8,15 @@ create table pgxjob_types (
 	name text not null unique
 );
 
+create table pgxjob_workers (
+	id int primary key,
+	inserted_at timestamptz not null default now(),
+	heartbeat timestamptz not null
+);
+
+create sequence pgxjob_workers_id_seq as int cycle owned by pgxjob_workers.id;
+alter table pgxjob_workers alter column id set default nextval('pgxjob_workers_id_seq');
+
 -- pgxjob_jobs can potentially be a very hot table. We want to keep it as small as possible.
 --
 -- Columns are carefully ordered to avoid wasted space. See https://www.2ndquadrant.com/en/blog/on-rocks-and-sand/ for
