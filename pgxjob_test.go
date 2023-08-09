@@ -105,7 +105,7 @@ type runAtJob struct {
 	Params     []byte
 }
 
-type pgxjobJobRun struct {
+type jobRun struct {
 	JobID      int64
 	InsertedAt time.Time
 	RunAt      time.Time
@@ -188,7 +188,7 @@ func TestASAPEndToEnd(t *testing.T) {
 
 	afterRunNow := time.Now()
 
-	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
@@ -279,7 +279,7 @@ func TestRunAtEndToEnd(t *testing.T) {
 
 	afterRunNow := time.Now()
 
-	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
@@ -359,7 +359,7 @@ func TestJobFailedNoRetry(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 
-	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
@@ -425,7 +425,7 @@ func TestUnknownJobType(t *testing.T) {
 	err = <-startErrChan
 	require.NoError(t, err)
 
-	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[pgxjobJobRun])
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 
 	require.EqualValues(t, 1, jobRun.RunNumber)
@@ -491,7 +491,7 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.EqualValues(t, 1, job.ErrorCount.Int32)
 	require.Equal(t, "test error", job.LastError.String)
 
-	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[pgxjobJobRun])
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs where job_id = $1`, []any{job.ID}, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
