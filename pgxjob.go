@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype/zeronull"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgxutil"
 )
@@ -423,7 +424,31 @@ func (w *Worker) Start() error {
 func (w *Worker) flushJobResults() {
 	defer close(w.flushJobResultsDoneChan)
 
+	type pgxjobJobRun struct {
+		JobID      int64
+		QueuedAt   time.Time
+		RunAt      time.Time
+		StartedAt  time.Time
+		FinishedAt time.Time
+		RunNumber  int32
+		QueueID    int32
+		TypeID     int32
+		Priority   int16
+		Params     []byte
+		Error      zeronull.Text
+	}
+
+	type pgxjobJobUpdate struct {
+		ID         int64
+		ErrorCount int32
+		LastError  string
+		NextRunAt  time.Time
+	}
+
 	jobResults := make([]*jobResult, 0, w.MaxBufferedJobResults)
+	jobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
+	pgxjobJobRunsToInsert := make([]pgxjobJobRun, 0, w.MaxBufferedJobResults)
+
 	flushTimer := time.NewTimer(time.Hour)
 	flushTimer.Stop()
 
@@ -434,12 +459,102 @@ func (w *Worker) flushJobResults() {
 			default:
 			}
 		}
+
+		// Always clear the results even if there is an error. In case of error there is nothing that can be done.
+		defer func() {
+			clear(jobResults)
+			jobResults = jobResults[:0]
+			clear(jobIDsToDelete)
+			jobIDsToDelete = jobIDsToDelete[:0]
+			clear(pgxjobJobRunsToInsert)
+			pgxjobJobRunsToInsert = pgxjobJobRunsToInsert[:0]
+		}()
+
+		// Job errors should be rare. So do not use persistent slice like jobIDsToDelete and pgxjobJobRunsToInsert.
+		var pgxjobJobUpdates []pgxjobJobUpdate
 		for _, jobResult := range jobResults {
-			w.recordJobResults(jobResult.job, jobResult.startTime, jobResult.finishedAt, jobResult.err)
+			job := jobResult.job
+			var errForInsert zeronull.Text
+			if jobResult.err == nil {
+				jobIDsToDelete = append(jobIDsToDelete, jobResult.job.ID)
+			} else {
+				errForInsert = zeronull.Text(jobResult.err.Error())
+				var errorWithRetry *ErrorWithRetry
+				if errors.As(jobResult.err, &errorWithRetry) {
+					pgxjobJobUpdates = append(pgxjobJobUpdates, pgxjobJobUpdate{
+						ID:         job.ID,
+						ErrorCount: job.ErrorCount + 1,
+						LastError:  errorWithRetry.Err.Error(),
+						NextRunAt:  errorWithRetry.RetryAt,
+					})
+				} else {
+					jobIDsToDelete = append(jobIDsToDelete, jobResult.job.ID)
+				}
+			}
+			pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
+				JobID:      job.ID,
+				QueuedAt:   job.QueuedAt,
+				RunAt:      job.RunAt,
+				StartedAt:  jobResult.startTime,
+				FinishedAt: jobResult.finishedAt,
+				RunNumber:  job.ErrorCount + 1,
+				QueueID:    job.Queue.ID,
+				TypeID:     job.Type.ID,
+				Priority:   job.Priority,
+				Params:     job.Params,
+				Error:      errForInsert,
+			})
 		}
 
-		clear(jobResults)
-		jobResults = jobResults[:0]
+		batch := &pgx.Batch{}
+		if len(jobIDsToDelete) > 0 {
+			batch.Queue(`delete from pgxjob_jobs where id = any($1)`, jobIDsToDelete)
+		}
+		for _, jobUpdate := range pgxjobJobUpdates {
+			batch.Queue(
+				`update pgxjob_jobs set error_count = $1, last_error = $2, next_run_at = $3 where id = $4`,
+				jobUpdate.ErrorCount, jobUpdate.LastError, jobUpdate.NextRunAt, jobUpdate.ID,
+			)
+		}
+
+		// The entirety of getting a connection and performing the updates should be very quick. But set a timeout as a
+		// failsafe.
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
+
+		conn, release, err := w.scheduler.getConnFunc(ctx)
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: recording job results: failed to get connection: %w", err))
+			return
+		}
+		defer release()
+
+		// Note: purposely not using an explicit transaction. The batch and the copy are each transactional. The only value
+		// of the explicit transaction would be to *not* save the batch changes (deletes and updates to pgxjob_jobs table)
+		// if the copy failed. It is preferable to preserve those changes even if the copy fails. It also saves a round
+		// trip for the begin and the commit.
+
+		err = conn.SendBatch(ctx, batch).Close()
+		if err != nil {
+			w.handleWorkerError(fmt.Errorf("pgxjob: recording job results: failed to send batch: %w", err))
+			return
+		}
+
+		if len(pgxjobJobRunsToInsert) > 0 {
+			_, err = conn.CopyFrom(
+				ctx,
+				pgx.Identifier{"pgxjob_job_runs"},
+				[]string{"job_id", "queued_at", "run_at", "started_at", "finished_at", "run_number", "queue_id", "type_id", "priority", "params", "error"},
+				pgx.CopyFromSlice(len(pgxjobJobRunsToInsert), func(i int) ([]any, error) {
+					row := &pgxjobJobRunsToInsert[i]
+					return []any{row.JobID, row.QueuedAt, row.RunAt, row.StartedAt, row.FinishedAt, row.RunNumber, row.QueueID, row.TypeID, row.Priority, row.Params, row.Error}, nil
+				}),
+			)
+			if err != nil {
+				w.handleWorkerError(fmt.Errorf("pgxjob: recording job results: failed to copy pgxjob_job_runs: %w", err))
+				return
+			}
+		}
 	}
 
 	defer flush()
