@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgxutil"
 )
 
-const pgChannelName = "pgxjob_jobs"
+const pgChannelName = "pgxjob_job_available"
 const defaultGroupName = "default"
 
 var lockDuration = 1 * time.Minute
@@ -240,23 +240,25 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 		}
 	}
 
-	batch := &pgx.Batch{}
 	if schedule.RunAt.IsZero() {
+		batch := &pgx.Batch{}
 		batch.Queue(
-			`insert into pgxjob_jobs (group_id, type_id, params) values ($1, $2, $3)`,
+			`insert into pgxjob_asap_jobs (group_id, type_id, params) values ($1, $2, $3)`,
 			jobGroup.ID, jobType.ID, jobParams,
 		)
+		batch.Queue(`select pg_notify($1, null)`, pgChannelName)
+		err := db.SendBatch(ctx, batch).Close()
+		if err != nil {
+			return fmt.Errorf("pgxjob: failed to schedule asap job: %w", err)
+		}
 	} else {
-		batch.Queue(
-			`insert into pgxjob_jobs (group_id, type_id, params, next_run_at) values ($1, $2, $3, $4)`,
+		_, err := db.Exec(ctx,
+			`insert into pgxjob_run_at_jobs (group_id, type_id, params, run_at, next_run_at, error_count) values ($1, $2, $3, $4, $4, 0)`,
 			jobGroup.ID, jobType.ID, jobParams, schedule.RunAt,
 		)
-	}
-
-	batch.Queue(`select pg_notify($1, null)`, pgChannelName)
-	err := db.SendBatch(ctx, batch).Close()
-	if err != nil {
-		return fmt.Errorf("pgxjob: failed to schedule job: %w", err)
+		if err != nil {
+			return fmt.Errorf("pgxjob: failed to schedule run at job: %w", err)
+		}
 	}
 
 	return nil
@@ -308,7 +310,7 @@ type Worker struct {
 	ID int32
 
 	WorkerConfig
-	groupID int32
+	group *JobGroup
 
 	scheduler  *Scheduler
 	signalChan chan struct{}
@@ -335,7 +337,7 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	if !ok {
 		return nil, fmt.Errorf("pgxjob: group with name %s not registered", config.GroupName)
 	}
-	groupID := jg.ID
+	group := jg
 
 	if config.MaxConcurrentJobs == 0 {
 		config.MaxConcurrentJobs = 10
@@ -374,7 +376,7 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	w := &Worker{
 		ID:             workerID,
 		WorkerConfig:   config,
-		groupID:        groupID,
+		group:          group,
 		scheduler:      m,
 		signalChan:     make(chan struct{}, 1),
 		jobChan:        make(chan *Job),
@@ -465,14 +467,15 @@ func (w *Worker) writeJobResults() {
 	}
 
 	type pgxjobJobUpdate struct {
-		ID         int64
-		ErrorCount int32
-		LastError  string
-		NextRunAt  time.Time
+		ID        int64
+		LastError string
+		NextRunAt time.Time
+		ASAP      bool
 	}
 
 	jobResults := make([]*jobResult, 0, w.MaxBufferedJobResults)
-	jobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
+	asapJobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
+	runAtJobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
 	pgxjobJobRunsToInsert := make([]pgxjobJobRun, 0, w.MaxBufferedJobResults)
 
 	flushTimer := time.NewTimer(time.Hour)
@@ -490,8 +493,10 @@ func (w *Worker) writeJobResults() {
 		defer func() {
 			clear(jobResults)
 			jobResults = jobResults[:0]
-			clear(jobIDsToDelete)
-			jobIDsToDelete = jobIDsToDelete[:0]
+			clear(asapJobIDsToDelete)
+			asapJobIDsToDelete = asapJobIDsToDelete[:0]
+			clear(runAtJobIDsToDelete)
+			runAtJobIDsToDelete = runAtJobIDsToDelete[:0]
 			clear(pgxjobJobRunsToInsert)
 			pgxjobJobRunsToInsert = pgxjobJobRunsToInsert[:0]
 		}()
@@ -502,19 +507,27 @@ func (w *Worker) writeJobResults() {
 			job := jobResult.job
 			var errForInsert zeronull.Text
 			if jobResult.err == nil {
-				jobIDsToDelete = append(jobIDsToDelete, jobResult.job.ID)
+				if job.ASAP {
+					asapJobIDsToDelete = append(asapJobIDsToDelete, jobResult.job.ID)
+				} else {
+					runAtJobIDsToDelete = append(runAtJobIDsToDelete, jobResult.job.ID)
+				}
 			} else {
 				errForInsert = zeronull.Text(jobResult.err.Error())
 				var errorWithRetry *ErrorWithRetry
 				if errors.As(jobResult.err, &errorWithRetry) {
 					pgxjobJobUpdates = append(pgxjobJobUpdates, pgxjobJobUpdate{
-						ID:         job.ID,
-						ErrorCount: job.ErrorCount + 1,
-						LastError:  errorWithRetry.Err.Error(),
-						NextRunAt:  errorWithRetry.RetryAt,
+						ID:        job.ID,
+						LastError: errorWithRetry.Err.Error(),
+						NextRunAt: errorWithRetry.RetryAt,
+						ASAP:      job.ASAP,
 					})
 				} else {
-					jobIDsToDelete = append(jobIDsToDelete, jobResult.job.ID)
+					if job.ASAP {
+						asapJobIDsToDelete = append(asapJobIDsToDelete, jobResult.job.ID)
+					} else {
+						runAtJobIDsToDelete = append(runAtJobIDsToDelete, jobResult.job.ID)
+					}
 				}
 			}
 			pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
@@ -532,14 +545,29 @@ func (w *Worker) writeJobResults() {
 		}
 
 		batch := &pgx.Batch{}
-		if len(jobIDsToDelete) > 0 {
-			batch.Queue(`delete from pgxjob_jobs where id = any($1)`, jobIDsToDelete)
-		}
 		for _, jobUpdate := range pgxjobJobUpdates {
-			batch.Queue(
-				`update pgxjob_jobs set error_count = $1, last_error = $2, next_run_at = $3 where id = $4`,
-				jobUpdate.ErrorCount, jobUpdate.LastError, jobUpdate.NextRunAt, jobUpdate.ID,
-			)
+			if jobUpdate.ASAP {
+				batch.Queue(
+					`with t as (
+	delete from pgxjob_asap_jobs where id = $1 returning *
+)
+insert into pgxjob_run_at_jobs (id, inserted_at, run_at, next_run_at, group_id, type_id, error_count, last_error, params)
+select id, inserted_at, inserted_at, $2, group_id, type_id, 1, $3, params
+from t`,
+					jobUpdate.ID, jobUpdate.NextRunAt, jobUpdate.LastError,
+				)
+			} else {
+				batch.Queue(
+					`update pgxjob_run_at_jobs set error_count = error_count + 1, last_error = $1, next_run_at = $2 where id = $3`,
+					jobUpdate.LastError, jobUpdate.NextRunAt, jobUpdate.ID,
+				)
+			}
+		}
+		if len(asapJobIDsToDelete) > 0 {
+			batch.Queue(`delete from pgxjob_asap_jobs where id = any($1)`, asapJobIDsToDelete)
+		}
+		if len(runAtJobIDsToDelete) > 0 {
+			batch.Queue(`delete from pgxjob_run_at_jobs where id = any($1)`, runAtJobIDsToDelete)
 		}
 
 		// COPY FROM is faster than INSERT for multiple rows. But it has the overhead of an extra round trip and
@@ -569,9 +597,8 @@ func (w *Worker) writeJobResults() {
 		defer release()
 
 		// Note: purposely not using an explicit transaction. The batch and the copy are each transactional. The only value
-		// of the explicit transaction would be to *not* save the batch changes (deletes and updates to pgxjob_jobs table)
-		// if the copy failed. It is preferable to preserve those changes even if the copy fails. It also saves a round
-		// trip for the begin and the commit.
+		// of the explicit transaction would be to *not* save the batch changes if the copy failed. It is preferable to
+		// preserve those changes even if the copy fails. It also saves a round trip for the begin and the commit.
 
 		err = conn.SendBatch(ctx, batch).Close()
 		if err != nil {
@@ -667,6 +694,7 @@ type Job struct {
 	RunAt      time.Time
 	LastError  string
 	ErrorCount int32
+	ASAP       bool
 }
 
 type jobResult struct {
@@ -725,25 +753,44 @@ func (w *Worker) fetchAndStartJobs() error {
 	}
 }
 
-// fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is group id. $2
-// is the maximum number of jobs to fetch. $3 is the lock duration.
+// fetchAndLockASAPJobsSQL is used to fetch and lock pgxjob_asap_jobs in a single query. It takes 3 bound parameters. $1
+// is group id. $2 is the maximum number of jobs to fetch. $3 is worker_id that is locking the job.
 //
 // Exactly how concurrency and locking work with CTEs can be confusing, but the "for update skip locked" is held for the
 // entire statement (actually the lock is held for the entire transaction) per Tom Lane
 // (https://www.postgresql.org/message-id/1604.1499787945%40sss.pgh.pa.us).
-const fetchAndLockJobsSQL = `with lock_jobs as (
+const fetchAndLockASAPJobsSQL = `with lock_jobs as (
 	select id
-	from pgxjob_jobs
-	where (next_run_at < now() or next_run_at is null)
-		and group_id = $1
+	from pgxjob_asap_jobs
+	where group_id = $1
+		and worker_id is null
 	limit $2
 	for update skip locked
 )
-update pgxjob_jobs
-set run_at = coalesce(run_at, inserted_at),
-	next_run_at = now() + $3
+update pgxjob_asap_jobs
+set worker_id = $3
 where id in (select id from lock_jobs)
-returning id, group_id, type_id, params, inserted_at, run_at, coalesce(last_error, ''), coalesce(error_count, 0)`
+returning id, type_id, params, inserted_at`
+
+// fetchAndLockRunAtJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is group id. $2
+// is the maximum number of jobs to fetch. $3 is worker_id that is locking the job.
+//
+// Exactly how concurrency and locking work with CTEs can be confusing, but the "for update skip locked" is held for the
+// entire statement (actually the lock is held for the entire transaction) per Tom Lane
+// (https://www.postgresql.org/message-id/1604.1499787945%40sss.pgh.pa.us).
+const fetchAndLockRunAtJobsSQL = `with lock_jobs as (
+	select id
+	from pgxjob_run_at_jobs
+	where next_run_at < now()
+		and group_id = $1
+		and worker_id is null
+	limit $2
+	for update skip locked
+)
+update pgxjob_run_at_jobs
+set worker_id = $3
+where id in (select id from lock_jobs)
+returning id, type_id, params, inserted_at, run_at, coalesce(last_error, ''), error_count`
 
 func (w *Worker) fetchJobs() ([]*Job, error) {
 	conn, release, err := w.scheduler.getConnFunc(w.cancelCtx)
@@ -752,39 +799,75 @@ func (w *Worker) fetchJobs() ([]*Job, error) {
 	}
 	defer release()
 
+	jobTypeFromID := func(jobTypeID int32) *JobType {
+		if jobType, ok := w.scheduler.jobTypesByID[jobTypeID]; ok {
+			return jobType
+		} else {
+			// This should never happen because job types are created and never deleted. But if somehow it does happen then
+			// create a fake JobType with a RunJob that returns an error.
+			return &JobType{
+				ID: jobTypeID,
+				RunJob: func(ctx context.Context, job *Job) error {
+					return fmt.Errorf("pgxjob: job type with id %d not registered", jobTypeID)
+				},
+			}
+		}
+	}
+
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
-		fetchAndLockJobsSQL,
-		[]any{w.groupID, w.MaxPrefetchedJobs, lockDuration},
+		fetchAndLockASAPJobsSQL,
+		[]any{w.group.ID, w.MaxPrefetchedJobs, w.ID},
 		func(row pgx.CollectableRow) (*Job, error) {
 			var job Job
-			var jobGroupID int32
 			var jobTypeID int32
 			err := row.Scan(
-				&job.ID, &jobGroupID, &jobTypeID, &job.Params, &job.InsertedAt, &job.RunAt, &job.LastError, &job.ErrorCount,
+				&job.ID, &jobTypeID, &job.Params, &job.InsertedAt,
 			)
 			if err != nil {
 				return nil, err
 			}
+			job.RunAt = job.InsertedAt
+			job.ASAP = true
 
-			job.Group = w.scheduler.jobGroupsByID[jobGroupID]
-			if jobType, ok := w.scheduler.jobTypesByID[jobTypeID]; ok {
-				job.Type = jobType
-			} else {
-				// This should never happen because job types are created and never deleted. But if somehow it does happen then
-				// create a fake JobType with a RunJob that returns an error.
-				job.Type = &JobType{
-					ID: jobTypeID,
-					RunJob: func(ctx context.Context, job *Job) error {
-						return fmt.Errorf("pgxjob: job type with id %d not registered", jobTypeID)
-					},
-				}
-			}
+			job.Group = w.group
+			job.Type = jobTypeFromID(jobTypeID)
 
 			return &job, nil
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to lock jobs: %w", err)
+		return nil, fmt.Errorf("failed to fetch and lock pgxjob_asap_jobs: %w", err)
+	}
+
+	if len(jobs) < w.MaxPrefetchedJobs {
+		runAtJobs, err := pgxutil.Select(w.cancelCtx, conn,
+			fetchAndLockRunAtJobsSQL,
+			[]any{w.group.ID, w.MaxPrefetchedJobs - len(jobs), w.ID},
+			func(row pgx.CollectableRow) (*Job, error) {
+				var job Job
+				var jobTypeID int32
+				err := row.Scan(
+					&job.ID, &jobTypeID, &job.Params, &job.InsertedAt, &job.RunAt, &job.LastError, &job.ErrorCount,
+				)
+				if err != nil {
+					return nil, err
+				}
+				job.ASAP = false
+
+				job.Group = w.group
+				job.Type = jobTypeFromID(jobTypeID)
+
+				return &job, nil
+			},
+		)
+		if err != nil {
+			// If some jobs were successfully locked. Return those without an error.
+			if len(jobs) > 0 {
+				return jobs, nil
+			}
+			return nil, fmt.Errorf("failed to fetch and lock pgxjob_run_at_jobs: %w", err)
+		}
+		jobs = append(jobs, runAtJobs...)
 	}
 
 	return jobs, nil
