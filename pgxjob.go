@@ -21,8 +21,6 @@ import (
 const pgChannelName = "pgxjob_job_available"
 const defaultGroupName = "default"
 
-var lockDuration = 1 * time.Minute
-
 var minWorkerHeartbeatDelay = 45 * time.Second
 var workerHeartbeatDelayJitter = 30 * time.Second
 var workerDeadWithoutHeartbeatDuration = 5 * (minWorkerHeartbeatDelay + workerHeartbeatDelayJitter)
