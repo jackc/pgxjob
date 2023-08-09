@@ -521,6 +521,20 @@ func (w *Worker) flushJobResults() {
 			)
 		}
 
+		// COPY FROM is faster than INSERT for multiple rows. But it has the overhead of an extra round trip and
+		// (auto-commit) transaction. So for small numbers of rows it is faster to bundle INSERTs with the batch that is
+		// already being used.
+		const jobsRunCopyThreshhold = 5
+
+		if len(pgxjobJobRunsToInsert) < jobsRunCopyThreshhold {
+			for _, jobRun := range pgxjobJobRunsToInsert {
+				batch.Queue(
+					`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, priority, params, error) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+					jobRun.JobID, jobRun.QueuedAt, jobRun.RunAt, jobRun.StartedAt, jobRun.FinishedAt, jobRun.RunNumber, jobRun.QueueID, jobRun.TypeID, jobRun.Priority, jobRun.Params, jobRun.Error,
+				)
+			}
+		}
+
 		// The entirety of getting a connection and performing the updates should be very quick. But set a timeout as a
 		// failsafe.
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
@@ -544,7 +558,7 @@ func (w *Worker) flushJobResults() {
 			return
 		}
 
-		if len(pgxjobJobRunsToInsert) > 0 {
+		if len(pgxjobJobRunsToInsert) >= jobsRunCopyThreshhold {
 			_, err = conn.CopyFrom(
 				ctx,
 				pgx.Identifier{"pgxjob_job_runs"},
