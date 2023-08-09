@@ -408,6 +408,10 @@ func (w *Worker) Start() error {
 
 		err := w.fetchAndStartJobs()
 		if err != nil {
+			// context.Canceled means that w.cancelCtx was cancelled. This happens when shutting down.
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
 			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch and start jobs: %w", err))
 		}
 

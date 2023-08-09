@@ -157,10 +157,9 @@ func TestSimpleEndToEnd(t *testing.T) {
 	require.False(t, job.LastError.Valid)
 	require.Equal(t, []byte(nil), job.Params)
 
-	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			workerErrChan <- err
+			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
@@ -173,8 +172,6 @@ func TestSimpleEndToEnd(t *testing.T) {
 
 	select {
 	case <-jobRanChan:
-	case err := <-workerErrChan:
-		t.Fatalf("workerErrChan: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for job to run")
 	}
@@ -233,10 +230,9 @@ func TestJobFailedNoRetry(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
 
-	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			workerErrChan <- err
+			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
@@ -249,8 +245,6 @@ func TestJobFailedNoRetry(t *testing.T) {
 
 	select {
 	case <-jobRanChan:
-	case err := <-workerErrChan:
-		t.Fatalf("workerErrChan: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for job to run")
 	}
@@ -303,10 +297,9 @@ func TestUnknownJobType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			workerErrChan <- err
+			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
@@ -371,10 +364,9 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			workerErrChan <- err
+			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
@@ -387,8 +379,6 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 
 	select {
 	case <-jobRanChan:
-	case err := <-workerErrChan:
-		t.Fatalf("workerErrChan: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for job to run")
 	}
@@ -450,10 +440,9 @@ func TestWorkerRunsBacklog(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	workerErrChan := make(chan error)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			workerErrChan <- err
+			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
@@ -467,8 +456,6 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	for i := 0; i < backlogCount; i++ {
 		select {
 		case <-jobRanChan:
-		case err := <-workerErrChan:
-			t.Fatalf("workerErrChan: %v", err)
 		case <-ctx.Done():
 			t.Fatal("timed out waiting for job to run")
 		}
@@ -586,13 +573,9 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 		require.NoError(b, err)
 	}
 
-	workerErrChan := make(chan error, 1)
 	worker, err := scheduler.NewWorker(pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
-			select {
-			case workerErrChan <- err:
-			default:
-			}
+			b.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(b, err)
@@ -611,8 +594,6 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 		case <-runJobChan:
 		case err := <-startErrChan:
 			b.Fatalf("startErrChan: %v", err)
-		case err := <-workerErrChan:
-			b.Fatalf("workerErrChan: %v", err)
 		case <-ctx.Done():
 			b.Fatalf("timed out waiting for jobs to finish: %d", i)
 		}
@@ -623,12 +604,6 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 
 	err = <-startErrChan
 	require.NoError(b, err)
-
-	select {
-	case err := <-workerErrChan:
-		b.Fatalf("workerErrChan: %v", err)
-	default:
-	}
 }
 
 func benchmarkPostgreSQLParamsInsert(b *testing.B, params_type string) {
