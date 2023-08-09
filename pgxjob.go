@@ -728,58 +728,6 @@ func (w *Worker) startJob(job *Job) {
 	}(job)
 }
 
-// recordJobResults records the results of running a job. It does not take a context because it should still execute
-// even if the context that controls the overall Worker.Run is cancelled.
-func (w *Worker) recordJobResults(job *Job, startedAt, finishedAt time.Time, jobErr error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, release, err := w.scheduler.getConnFunc(ctx)
-	if err != nil {
-		w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: failed to get connection: %w", job.ID, err))
-	}
-	defer release()
-
-	if jobErr == nil {
-		_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
-		if err != nil {
-			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
-		}
-
-		_, err = pgxutil.ExecRow(ctx, conn,
-			`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			job.ID, job.InsertedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Group.ID, job.Type.ID, job.Params)
-		if err != nil {
-			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
-		}
-	} else {
-		_, err = pgxutil.ExecRow(ctx, conn,
-			`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params, error)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			job.ID, job.InsertedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Group.ID, job.Type.ID, job.Params, jobErr.Error())
-		if err != nil {
-			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
-		}
-
-		var errorWithRetry *ErrorWithRetry
-		if errors.As(jobErr, &errorWithRetry) {
-			_, err = pgxutil.ExecRow(ctx, conn,
-				`update pgxjob_jobs set error_count = $1, last_error = $2, next_run_at = $3 where id = $4`,
-				job.ErrorCount+1, errorWithRetry.Err.Error(), errorWithRetry.RetryAt, job.ID,
-			)
-			if err != nil {
-				w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
-			}
-		} else {
-			_, err = pgxutil.ExecRow(ctx, conn, `delete from pgxjob_jobs where id = $1`, job.ID)
-			if err != nil {
-				w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
-			}
-		}
-	}
-}
-
 func (w *Worker) handleWorkerError(err error) {
 	if w.HandleWorkerError != nil {
 		w.HandleWorkerError(w, err)
