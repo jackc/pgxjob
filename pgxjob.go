@@ -240,18 +240,16 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 		}
 	}
 
-	now := time.Now()
-
 	batch := &pgx.Batch{}
 	if schedule.RunAt.IsZero() {
 		batch.Queue(
-			`insert into pgxjob_jobs (group_id, type_id, params, inserted_at) values ($1, $2, $3, $4)`,
-			jobGroup.ID, jobType.ID, jobParams, now,
+			`insert into pgxjob_jobs (group_id, type_id, params) values ($1, $2, $3)`,
+			jobGroup.ID, jobType.ID, jobParams,
 		)
 	} else {
 		batch.Queue(
-			`insert into pgxjob_jobs (group_id, type_id, params, inserted_at, next_run_at) values ($1, $2, $3, $4, $5)`,
-			jobGroup.ID, jobType.ID, jobParams, now, schedule.RunAt,
+			`insert into pgxjob_jobs (group_id, type_id, params, next_run_at) values ($1, $2, $3, $4)`,
+			jobGroup.ID, jobType.ID, jobParams, schedule.RunAt,
 		)
 	}
 

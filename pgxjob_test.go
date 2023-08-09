@@ -300,9 +300,8 @@ func TestUnknownJobType(t *testing.T) {
 	require.NoError(t, err)
 
 	err = pgxutil.InsertRow(ctx, conn, "pgxjob_jobs", map[string]any{
-		"inserted_at": time.Now(),
-		"group_id":    1,  // 1 should always be the default group
-		"type_id":     -1, // -1 should never exist
+		"group_id": 1,  // 1 should always be the default group
+		"type_id":  -1, // -1 should never exist
 	})
 	require.NoError(t, err)
 
