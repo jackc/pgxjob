@@ -83,10 +83,10 @@ func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
 
 type pgxjobJob struct {
 	ID         int64
-	QueuedAt   time.Time
+	InsertedAt time.Time
 	NextRunAt  pgtype.Timestamptz
 	RunAt      pgtype.Timestamptz
-	QueueID    int32
+	GroupID    int32
 	TypeID     int32
 	ErrorCount pgtype.Int4
 	LastError  pgtype.Text
@@ -95,12 +95,12 @@ type pgxjobJob struct {
 
 type pgxjobJobRun struct {
 	JobID      int64
-	QueuedAt   time.Time
+	InsertedAt time.Time
 	RunAt      time.Time
 	StartedAt  time.Time
 	FinishedAt time.Time
 	RunNumber  int32
-	QueueID    int32
+	GroupID    int32
 	TypeID     int32
 	Params     []byte
 	LastError  pgtype.Text
@@ -137,14 +137,14 @@ func TestSimpleEndToEnd(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_jobs`, nil, pgx.RowToStructByPos[pgxjobJob])
 	require.NoError(t, err)
 
-	require.True(t, job.QueuedAt.After(startTime))
-	require.True(t, job.QueuedAt.Before(afterScheduleNow))
+	require.True(t, job.InsertedAt.After(startTime))
+	require.True(t, job.InsertedAt.Before(afterScheduleNow))
 	require.False(t, job.NextRunAt.Valid)
 	require.False(t, job.RunAt.Valid)
 
-	defaultQueueID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_queues where name = 'default'`, nil, pgx.RowTo[int32])
+	defaultGroupID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_groups where name = 'default'`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
-	require.Equal(t, defaultQueueID, job.QueueID)
+	require.Equal(t, defaultGroupID, job.GroupID)
 
 	testJobTypeID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_types where name = 'test'`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
@@ -184,14 +184,14 @@ func TestSimpleEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
-	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
-	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.InsertedAt.Equal(job.InsertedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.InsertedAt))
 	require.True(t, jobRun.StartedAt.After(startTime))
 	require.True(t, jobRun.StartedAt.Before(afterRunNow))
 	require.True(t, jobRun.FinishedAt.After(startTime))
 	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
 	require.EqualValues(t, 1, jobRun.RunNumber)
-	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.GroupID, jobRun.GroupID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
@@ -260,14 +260,14 @@ func TestJobFailedNoRetry(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
-	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
-	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.InsertedAt.Equal(job.InsertedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.InsertedAt))
 	require.True(t, jobRun.StartedAt.After(startTime))
 	require.True(t, jobRun.StartedAt.Before(afterRunNow))
 	require.True(t, jobRun.FinishedAt.After(startTime))
 	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
 	require.EqualValues(t, 1, jobRun.RunNumber)
-	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.GroupID, jobRun.GroupID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, "test error", jobRun.LastError.String)
@@ -300,9 +300,9 @@ func TestUnknownJobType(t *testing.T) {
 	require.NoError(t, err)
 
 	err = pgxutil.InsertRow(ctx, conn, "pgxjob_jobs", map[string]any{
-		"queued_at": time.Now(),
-		"queue_id":  1,  // 1 should always be the default queue
-		"type_id":   -1, // -1 should never exist
+		"inserted_at": time.Now(),
+		"group_id":    1,  // 1 should always be the default group
+		"type_id":     -1, // -1 should never exist
 	})
 	require.NoError(t, err)
 
@@ -393,14 +393,14 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, job.ID, jobRun.JobID)
-	require.True(t, jobRun.QueuedAt.Equal(job.QueuedAt))
-	require.True(t, jobRun.RunAt.Equal(jobRun.QueuedAt))
+	require.True(t, jobRun.InsertedAt.Equal(job.InsertedAt))
+	require.True(t, jobRun.RunAt.Equal(jobRun.InsertedAt))
 	require.True(t, jobRun.StartedAt.After(startTime))
 	require.True(t, jobRun.StartedAt.Before(afterRunNow))
 	require.True(t, jobRun.FinishedAt.After(startTime))
 	require.True(t, jobRun.FinishedAt.Before(afterRunNow))
 	require.EqualValues(t, 1, jobRun.RunNumber)
-	require.Equal(t, job.QueueID, jobRun.QueueID)
+	require.Equal(t, job.GroupID, jobRun.GroupID)
 	require.Equal(t, job.TypeID, jobRun.TypeID)
 	require.Equal(t, job.Params, jobRun.Params)
 	require.Equal(t, job.LastError, jobRun.LastError)
@@ -459,9 +459,9 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	err = <-startErrChan
 	require.NoError(t, err)
 
-	jobsStillQueued, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_jobs`, nil, pgx.RowTo[int32])
+	jobsStillPending, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_jobs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
-	require.EqualValues(t, 0, jobsStillQueued)
+	require.EqualValues(t, 0, jobsStillPending)
 
 	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)

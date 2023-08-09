@@ -18,7 +18,7 @@ import (
 )
 
 const pgChannelName = "pgxjob_jobs"
-const defaultQueueName = "default"
+const defaultGroupName = "default"
 
 var lockDuration = 1 * time.Minute
 
@@ -26,8 +26,8 @@ var lockDuration = 1 * time.Minute
 type Scheduler struct {
 	getConnFunc GetConnFunc
 
-	jobQueuesByName map[string]*JobQueue
-	jobQueuesByID   map[int32]*JobQueue
+	jobGroupsByName map[string]*JobGroup
+	jobGroupsByID   map[int32]*JobGroup
 
 	jobTypesByName map[string]*JobType
 	jobTypesByID   map[int32]*JobType
@@ -37,13 +37,13 @@ type Scheduler struct {
 func NewScheduler(ctx context.Context, getConnFunc GetConnFunc) (*Scheduler, error) {
 	s := &Scheduler{
 		getConnFunc:     getConnFunc,
-		jobQueuesByName: map[string]*JobQueue{},
-		jobQueuesByID:   map[int32]*JobQueue{},
+		jobGroupsByName: map[string]*JobGroup{},
+		jobGroupsByID:   map[int32]*JobGroup{},
 		jobTypesByName:  make(map[string]*JobType),
 		jobTypesByID:    make(map[int32]*JobType),
 	}
 
-	err := s.RegisterJobQueue(ctx, defaultQueueName)
+	err := s.RegisterJobGroup(ctx, defaultGroupName)
 	if err != nil {
 		return nil, err
 	}
@@ -59,26 +59,26 @@ type JobType struct {
 	// Name is the name of the job type.
 	Name string
 
-	// DefaultQueue is the default queue to use when enqueuing jobs of this type.
-	DefaultQueue *JobQueue
+	// DefaultGroup is the default group to use when enqueuing jobs of this type.
+	DefaultGroup *JobGroup
 
 	// RunJob is the function that will be called when a job of this type is run.
 	RunJob func(ctx context.Context, job *Job) error
 }
 
-type JobQueue struct {
+type JobGroup struct {
 	ID   int32
 	Name string
 }
 
-// RegisterJobQueue registers a queue. It must be called before any jobs are scheduled or workers are started.
-func (s *Scheduler) RegisterJobQueue(ctx context.Context, name string) error {
+// RegisterJobGroup registers a group. It must be called before any jobs are scheduled or workers are started.
+func (s *Scheduler) RegisterJobGroup(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("pgxjob: name must be set")
 	}
 
-	if _, ok := s.jobQueuesByName[name]; ok {
-		return fmt.Errorf("pgxjob: queue with name %s already registered", name)
+	if _, ok := s.jobGroupsByName[name]; ok {
+		return fmt.Errorf("pgxjob: group with name %s already registered", name)
 	}
 
 	conn, release, err := s.getConnFunc(ctx)
@@ -87,26 +87,26 @@ func (s *Scheduler) RegisterJobQueue(ctx context.Context, name string) error {
 	}
 	defer release()
 
-	var jobQueueID int32
-	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_queues where name = $1`, name).Scan(&jobQueueID)
+	var jobGroupID int32
+	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_groups where name = $1`, name).Scan(&jobGroupID)
 	if errors.Is(selectIDErr, pgx.ErrNoRows) {
-		_, insertErr := conn.Exec(ctx, `insert into pgxjob_queues (name) values ($1) on conflict do nothing`, name)
+		_, insertErr := conn.Exec(ctx, `insert into pgxjob_groups (name) values ($1) on conflict do nothing`, name)
 		if insertErr != nil {
-			return fmt.Errorf("pgxjob: failed to insert queue %s: %w", name, insertErr)
+			return fmt.Errorf("pgxjob: failed to insert group %s: %w", name, insertErr)
 		}
 
-		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_queues where name = $1`, name).Scan(&jobQueueID)
+		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_groups where name = $1`, name).Scan(&jobGroupID)
 	}
 	if selectIDErr != nil {
-		return fmt.Errorf("pgxjob: failed to select id for queue %s: %w", name, selectIDErr)
+		return fmt.Errorf("pgxjob: failed to select id for group %s: %w", name, selectIDErr)
 	}
 
-	jq := &JobQueue{
-		ID:   jobQueueID,
+	jq := &JobGroup{
+		ID:   jobGroupID,
 		Name: name,
 	}
-	s.jobQueuesByName[jq.Name] = jq
-	s.jobQueuesByID[jq.ID] = jq
+	s.jobGroupsByName[jq.Name] = jq
+	s.jobGroupsByID[jq.ID] = jq
 	return nil
 }
 
@@ -114,9 +114,9 @@ type RegisterJobTypeParams struct {
 	// Name is the name of the job type. It must be set and unique.
 	Name string
 
-	// DefaultQueueName is the name of the default queue to use when enqueuing jobs of this type. If not set "default" is
+	// DefaultGroupName is the name of the default group to use when enqueuing jobs of this type. If not set "default" is
 	// used.
-	DefaultQueueName string
+	DefaultGroupName string
 
 	// RunJob is the function that will be called when a job of this type is run. It must be set.
 	RunJob RunJobFunc
@@ -128,13 +128,13 @@ func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeP
 		return fmt.Errorf("params.Name must be set")
 	}
 
-	if params.DefaultQueueName == "" {
-		params.DefaultQueueName = defaultQueueName
+	if params.DefaultGroupName == "" {
+		params.DefaultGroupName = defaultGroupName
 	}
 
-	defaultQueue, ok := s.jobQueuesByName[params.DefaultQueueName]
+	defaultGroup, ok := s.jobGroupsByName[params.DefaultGroupName]
 	if !ok {
-		return fmt.Errorf("pgxjob: queue with name %s not registered", params.DefaultQueueName)
+		return fmt.Errorf("pgxjob: group with name %s not registered", params.DefaultGroupName)
 	}
 
 	if params.RunJob == nil {
@@ -162,13 +162,13 @@ func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeP
 		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_types where name = $1`, params.Name).Scan(&jobTypeID)
 	}
 	if selectIDErr != nil {
-		return fmt.Errorf("pgxjob: failed to select id for queue %s: %w", params.Name, selectIDErr)
+		return fmt.Errorf("pgxjob: failed to select id for type %s: %w", params.Name, selectIDErr)
 	}
 
 	jt := &JobType{
 		ID:           jobTypeID,
 		Name:         params.Name,
-		DefaultQueue: defaultQueue,
+		DefaultGroup: defaultGroup,
 		RunJob:       params.RunJob,
 	}
 
@@ -205,8 +205,8 @@ type DB interface {
 
 // JobSchedule is a schedule for a job.
 type JobSchedule struct {
-	// QueueName is the name of the queue to use when enqueuing the job. If not set the job type's default queue is used.
-	QueueName string
+	// GroupName is the name of the group to use when enqueuing the job. If not set the job type's default group is used.
+	GroupName string
 
 	// RunAt is the time to run the job. If not set the job is scheduled to run immediately.
 	RunAt time.Time
@@ -224,14 +224,14 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 		return fmt.Errorf("pgxjob: job type with name %s not registered", jobTypeName)
 	}
 
-	var jobQueue *JobQueue
-	if schedule.QueueName == "" {
-		jobQueue = jobType.DefaultQueue
+	var jobGroup *JobGroup
+	if schedule.GroupName == "" {
+		jobGroup = jobType.DefaultGroup
 	} else {
 		var ok bool
-		jobQueue, ok = m.jobQueuesByName[schedule.QueueName]
+		jobGroup, ok = m.jobGroupsByName[schedule.GroupName]
 		if !ok {
-			return fmt.Errorf("pgxjob: queue with name %s not registered", schedule.QueueName)
+			return fmt.Errorf("pgxjob: group with name %s not registered", schedule.GroupName)
 		}
 	}
 
@@ -240,13 +240,13 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 	batch := &pgx.Batch{}
 	if schedule.RunAt.IsZero() {
 		batch.Queue(
-			`insert into pgxjob_jobs (queue_id, type_id, params, queued_at) values ($1, $2, $3, $4)`,
-			jobQueue.ID, jobType.ID, jobParams, now,
+			`insert into pgxjob_jobs (group_id, type_id, params, inserted_at) values ($1, $2, $3, $4)`,
+			jobGroup.ID, jobType.ID, jobParams, now,
 		)
 	} else {
 		batch.Queue(
-			`insert into pgxjob_jobs (queue_id, type_id, params, queued_at, next_run_at) values ($1, $2, $3, $4, $5)`,
-			jobQueue.ID, jobType.ID, jobParams, now, schedule.RunAt,
+			`insert into pgxjob_jobs (group_id, type_id, params, inserted_at, next_run_at) values ($1, $2, $3, $4, $5)`,
+			jobGroup.ID, jobType.ID, jobParams, now, schedule.RunAt,
 		)
 	}
 
@@ -273,8 +273,8 @@ func GetConnFromPoolFunc(pool *pgxpool.Pool) GetConnFunc {
 }
 
 type WorkerConfig struct {
-	// QueueName is the queue to work. If empty, "default" is used.
-	QueueName string
+	// GroupName is the group to work. If empty, "default" is used.
+	GroupName string
 
 	// MaxConcurrentJobs is the maximum number of jobs of all types to work concurrently. If not set 1 is used.
 	MaxConcurrentJobs int
@@ -299,7 +299,7 @@ type WorkerConfig struct {
 
 type Worker struct {
 	WorkerConfig
-	queueID int32
+	groupID int32
 
 	scheduler  *Scheduler
 	signalChan chan struct{}
@@ -318,14 +318,14 @@ type Worker struct {
 }
 
 func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
-	if config.QueueName == "" {
-		config.QueueName = defaultQueueName
+	if config.GroupName == "" {
+		config.GroupName = defaultGroupName
 	}
-	jq, ok := m.jobQueuesByName[config.QueueName]
+	jg, ok := m.jobGroupsByName[config.GroupName]
 	if !ok {
-		return nil, fmt.Errorf("pgxjob: queue with name %s not registered", config.QueueName)
+		return nil, fmt.Errorf("pgxjob: group with name %s not registered", config.GroupName)
 	}
-	queueID := jq.ID
+	groupID := jg.ID
 
 	if config.MaxConcurrentJobs == 0 {
 		config.MaxConcurrentJobs = 1
@@ -345,7 +345,7 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 
 	w := &Worker{
 		WorkerConfig:   config,
-		queueID:        queueID,
+		groupID:        groupID,
 		scheduler:      m,
 		signalChan:     make(chan struct{}, 1),
 		runningJobs:    make(map[int64]*Job, config.MaxConcurrentJobs),
@@ -400,12 +400,12 @@ func (w *Worker) flushJobResults() {
 
 	type pgxjobJobRun struct {
 		JobID      int64
-		QueuedAt   time.Time
+		InsertedAt time.Time
 		RunAt      time.Time
 		StartedAt  time.Time
 		FinishedAt time.Time
 		RunNumber  int32
-		QueueID    int32
+		GroupID    int32
 		TypeID     int32
 		Params     []byte
 		Error      zeronull.Text
@@ -466,12 +466,12 @@ func (w *Worker) flushJobResults() {
 			}
 			pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
 				JobID:      job.ID,
-				QueuedAt:   job.QueuedAt,
+				InsertedAt: job.InsertedAt,
 				RunAt:      job.RunAt,
 				StartedAt:  jobResult.startTime,
 				FinishedAt: jobResult.finishedAt,
 				RunNumber:  job.ErrorCount + 1,
-				QueueID:    job.Queue.ID,
+				GroupID:    job.Group.ID,
 				TypeID:     job.Type.ID,
 				Params:     job.Params,
 				Error:      errForInsert,
@@ -497,8 +497,8 @@ func (w *Worker) flushJobResults() {
 		if len(pgxjobJobRunsToInsert) < jobsRunCopyThreshhold {
 			for _, jobRun := range pgxjobJobRunsToInsert {
 				batch.Queue(
-					`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, params, error) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-					jobRun.JobID, jobRun.QueuedAt, jobRun.RunAt, jobRun.StartedAt, jobRun.FinishedAt, jobRun.RunNumber, jobRun.QueueID, jobRun.TypeID, jobRun.Params, jobRun.Error,
+					`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params, error) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+					jobRun.JobID, jobRun.InsertedAt, jobRun.RunAt, jobRun.StartedAt, jobRun.FinishedAt, jobRun.RunNumber, jobRun.GroupID, jobRun.TypeID, jobRun.Params, jobRun.Error,
 				)
 			}
 		}
@@ -530,10 +530,10 @@ func (w *Worker) flushJobResults() {
 			_, err = conn.CopyFrom(
 				ctx,
 				pgx.Identifier{"pgxjob_job_runs"},
-				[]string{"job_id", "queued_at", "run_at", "started_at", "finished_at", "run_number", "queue_id", "type_id", "params", "error"},
+				[]string{"job_id", "inserted_at", "run_at", "started_at", "finished_at", "run_number", "group_id", "type_id", "params", "error"},
 				pgx.CopyFromSlice(len(pgxjobJobRunsToInsert), func(i int) ([]any, error) {
 					row := &pgxjobJobRunsToInsert[i]
-					return []any{row.JobID, row.QueuedAt, row.RunAt, row.StartedAt, row.FinishedAt, row.RunNumber, row.QueueID, row.TypeID, row.Params, row.Error}, nil
+					return []any{row.JobID, row.InsertedAt, row.RunAt, row.StartedAt, row.FinishedAt, row.RunNumber, row.GroupID, row.TypeID, row.Params, row.Error}, nil
 				}),
 			)
 			if err != nil {
@@ -607,10 +607,10 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 
 type Job struct {
 	ID         int64
-	Queue      *JobQueue
+	Group      *JobGroup
 	Type       *JobType
 	Params     []byte
-	QueuedAt   time.Time
+	InsertedAt time.Time
 	RunAt      time.Time
 	LastError  string
 	ErrorCount int32
@@ -623,8 +623,8 @@ type jobResult struct {
 	err        error
 }
 
-// fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is an array of
-// of queue ids. $2 is the maximum number of jobs to fetch. $3 is the lock duration.
+// fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is group id. $2
+// is the maximum number of jobs to fetch. $3 is the lock duration.
 //
 // Exactly how concurrency and locking work with CTEs can be confusing, but the "for update skip locked" is held for the
 // entire statement (actually the lock is held for the entire transaction) per Tom Lane
@@ -633,15 +633,15 @@ const fetchAndLockJobsSQL = `with lock_jobs as (
 	select id
 	from pgxjob_jobs
 	where (next_run_at < now() or next_run_at is null)
-		and queue_id = $1
+		and group_id = $1
 	limit $2
 	for update skip locked
 )
 update pgxjob_jobs
-set run_at = coalesce(run_at, queued_at),
+set run_at = coalesce(run_at, inserted_at),
 	next_run_at = now() + $3
 where id in (select id from lock_jobs)
-returning id, queue_id, type_id, params, queued_at, run_at, coalesce(last_error, ''), coalesce(error_count, 0)`
+returning id, group_id, type_id, params, inserted_at, run_at, coalesce(last_error, ''), coalesce(error_count, 0)`
 
 func (w *Worker) fetchAndStartJobs() error {
 	w.mux.Lock()
@@ -660,19 +660,19 @@ func (w *Worker) fetchAndStartJobs() error {
 
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
 		fetchAndLockJobsSQL,
-		[]any{w.queueID, availableJobs, lockDuration},
+		[]any{w.groupID, availableJobs, lockDuration},
 		func(row pgx.CollectableRow) (*Job, error) {
 			var job Job
-			var jobQueueID int32
+			var jobGroupID int32
 			var jobTypeID int32
 			err := row.Scan(
-				&job.ID, &jobQueueID, &jobTypeID, &job.Params, &job.QueuedAt, &job.RunAt, &job.LastError, &job.ErrorCount,
+				&job.ID, &jobGroupID, &jobTypeID, &job.Params, &job.InsertedAt, &job.RunAt, &job.LastError, &job.ErrorCount,
 			)
 			if err != nil {
 				return nil, err
 			}
 
-			job.Queue = w.scheduler.jobQueuesByID[jobQueueID]
+			job.Group = w.scheduler.jobGroupsByID[jobGroupID]
 			if jobType, ok := w.scheduler.jobTypesByID[jobTypeID]; ok {
 				job.Type = jobType
 			} else {
@@ -747,17 +747,17 @@ func (w *Worker) recordJobResults(job *Job, startedAt, finishedAt time.Time, job
 		}
 
 		_, err = pgxutil.ExecRow(ctx, conn,
-			`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, params)
+			`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params)
 values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			job.ID, job.QueuedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Queue.ID, job.Type.ID, job.Params)
+			job.ID, job.InsertedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Group.ID, job.Type.ID, job.Params)
 		if err != nil {
 			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
 		}
 	} else {
 		_, err = pgxutil.ExecRow(ctx, conn,
-			`insert into pgxjob_job_runs (job_id, queued_at, run_at, started_at, finished_at, run_number, queue_id, type_id, params, error)
+			`insert into pgxjob_job_runs (job_id, inserted_at, run_at, started_at, finished_at, run_number, group_id, type_id, params, error)
 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			job.ID, job.QueuedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Queue.ID, job.Type.ID, job.Params, jobErr.Error())
+			job.ID, job.InsertedAt, job.RunAt, startedAt, finishedAt, job.ErrorCount+1, job.Group.ID, job.Type.ID, job.Params, jobErr.Error())
 		if err != nil {
 			w.handleWorkerError(fmt.Errorf("pgxjob: recording job %d results: %w", job.ID, err))
 		}
