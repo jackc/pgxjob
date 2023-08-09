@@ -276,8 +276,12 @@ type WorkerConfig struct {
 	// GroupName is the group to work. If empty, "default" is used.
 	GroupName string
 
-	// MaxConcurrentJobs is the maximum number of jobs of all types to work concurrently. If not set 1 is used.
+	// MaxConcurrentJobs is the maximum number of jobs to work concurrently. If not set 10 is used.
 	MaxConcurrentJobs int
+
+	// MaxPrefetchedJobs is the maximum number of prefetched jobs (i.e. jobs that are fetched from the database and
+	// locked, but not yet being worked). If not set 1000 is used.
+	MaxPrefetchedJobs int
 
 	// PollInterval is the interval between polling for new jobs. If not set 10 seconds is used.
 	PollInterval time.Duration
@@ -307,14 +311,15 @@ type Worker struct {
 	cancelCtx context.Context
 	cancel    context.CancelFunc
 
-	mux         sync.Mutex
-	runningJobs map[int64]*Job
-	running     bool
+	mux                     sync.Mutex
+	jobRunnerGoroutineCount int
+	running                 bool
 
-	jobWaitGroup sync.WaitGroup
+	jobRunnerGoroutineWaitGroup sync.WaitGroup
+	jobChan                     chan *Job
 
 	jobResultsChan          chan *jobResult
-	flushJobResultsDoneChan chan struct{}
+	writeJobResultsDoneChan chan struct{}
 }
 
 func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
@@ -328,7 +333,11 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 	groupID := jg.ID
 
 	if config.MaxConcurrentJobs == 0 {
-		config.MaxConcurrentJobs = 1
+		config.MaxConcurrentJobs = 10
+	}
+
+	if config.MaxPrefetchedJobs == 0 {
+		config.MaxPrefetchedJobs = 1000
 	}
 
 	if config.PollInterval == 0 {
@@ -348,7 +357,7 @@ func (m *Scheduler) NewWorker(config WorkerConfig) (*Worker, error) {
 		groupID:        groupID,
 		scheduler:      m,
 		signalChan:     make(chan struct{}, 1),
-		runningJobs:    make(map[int64]*Job, config.MaxConcurrentJobs),
+		jobChan:        make(chan *Job),
 		jobResultsChan: make(chan *jobResult),
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
@@ -364,39 +373,15 @@ func (w *Worker) Start() error {
 		return fmt.Errorf("pgxjob: worker already running")
 	}
 	w.running = true
-	w.flushJobResultsDoneChan = make(chan struct{})
-	go w.flushJobResults()
+	w.writeJobResultsDoneChan = make(chan struct{})
+	go w.writeJobResults()
 	w.mux.Unlock()
 
-	for {
-		// Check if the context is done before processing any jobs.
-		select {
-		case <-w.cancelCtx.Done():
-			return nil
-		default:
-		}
-
-		err := w.fetchAndStartJobs()
-		if err != nil {
-			// context.Canceled means that w.cancelCtx was cancelled. This happens when shutting down.
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch and start jobs: %w", err))
-		}
-
-		select {
-		case <-w.cancelCtx.Done():
-			return nil
-		case <-time.NewTimer(w.PollInterval).C:
-		case <-w.signalChan:
-		}
-	}
-
+	return w.fetchAndStartJobs()
 }
 
-func (w *Worker) flushJobResults() {
-	defer close(w.flushJobResultsDoneChan)
+func (w *Worker) writeJobResults() {
+	defer close(w.writeJobResultsDoneChan)
 
 	type pgxjobJobRun struct {
 		JobID      int64
@@ -568,7 +553,7 @@ loop1:
 
 	doneChan := make(chan struct{})
 	go func() {
-		w.jobWaitGroup.Wait()
+		w.jobRunnerGoroutineWaitGroup.Wait()
 		close(doneChan)
 	}()
 
@@ -592,8 +577,8 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 
 	doneChan := make(chan struct{})
 	go func() {
-		w.jobWaitGroup.Wait()
-		<-w.flushJobResultsDoneChan
+		w.jobRunnerGoroutineWaitGroup.Wait()
+		<-w.writeJobResultsDoneChan
 		close(doneChan)
 	}()
 
@@ -623,6 +608,55 @@ type jobResult struct {
 	err        error
 }
 
+func (w *Worker) fetchAndStartJobs() error {
+	for {
+		// Check if the context is done before processing any jobs.
+		select {
+		case <-w.cancelCtx.Done():
+			return nil
+		default:
+		}
+
+		jobs, err := w.fetchJobs()
+		if err != nil {
+			// context.Canceled means that w.cancelCtx was cancelled. This happens when shutting down.
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch jobs: %w", err))
+		}
+		noJobsAvailableInDatabase := len(jobs) < w.MaxPrefetchedJobs
+
+		for _, job := range jobs {
+			select {
+			case w.jobChan <- job:
+			case <-w.cancelCtx.Done():
+				return nil
+			default:
+				w.mux.Lock()
+				if w.jobRunnerGoroutineCount < w.MaxConcurrentJobs {
+					w.startJobRunner()
+				}
+				w.mux.Unlock()
+				select {
+				case w.jobChan <- job:
+				case <-w.cancelCtx.Done():
+					return nil
+				}
+			}
+		}
+
+		if noJobsAvailableInDatabase {
+			select {
+			case <-w.cancelCtx.Done():
+				return nil
+			case <-time.NewTimer(w.PollInterval).C:
+			case <-w.signalChan:
+			}
+		}
+	}
+}
+
 // fetchAndLockJobsSQL is used to fetch and lock jobs in a single query. It takes 3 bound parameters. $1 is group id. $2
 // is the maximum number of jobs to fetch. $3 is the lock duration.
 //
@@ -643,24 +677,16 @@ set run_at = coalesce(run_at, inserted_at),
 where id in (select id from lock_jobs)
 returning id, group_id, type_id, params, inserted_at, run_at, coalesce(last_error, ''), coalesce(error_count, 0)`
 
-func (w *Worker) fetchAndStartJobs() error {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-	availableJobs := w.MaxConcurrentJobs - len(w.runningJobs)
-
-	if availableJobs == 0 {
-		return nil
-	}
-
+func (w *Worker) fetchJobs() ([]*Job, error) {
 	conn, release, err := w.scheduler.getConnFunc(w.cancelCtx)
 	if err != nil {
-		return fmt.Errorf("failed to get connection: %w", err)
+		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 	defer release()
 
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
 		fetchAndLockJobsSQL,
-		[]any{w.groupID, availableJobs, lockDuration},
+		[]any{w.groupID, w.MaxPrefetchedJobs, lockDuration},
 		func(row pgx.CollectableRow) (*Job, error) {
 			var job Job
 			var jobGroupID int32
@@ -690,42 +716,50 @@ func (w *Worker) fetchAndStartJobs() error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to lock jobs: %w", err)
+		return nil, fmt.Errorf("failed to lock jobs: %w", err)
 	}
 
-	for _, job := range jobs {
-		w.startJob(job)
-	}
-
-	return nil
+	return jobs, nil
 }
 
-// startJob runs a job in a goroutine. w.mux must be locked.
-func (w *Worker) startJob(job *Job) {
-	w.jobWaitGroup.Add(1)
-	w.runningJobs[job.ID] = job
+// startJobRunner starts a new job runner. w.mux must be locked before calling.
+func (w *Worker) startJobRunner() {
+	w.jobRunnerGoroutineWaitGroup.Add(1)
+	w.jobRunnerGoroutineCount++
 
-	go func(job *Job) {
-		defer w.jobWaitGroup.Done()
-
-		startedAt := time.Now()
-		var err error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					stack := debug.Stack()
-					err = fmt.Errorf("panic: %v\n%s", r, string(stack))
-				}
-			}()
-			err = job.Type.RunJob(w.cancelCtx, job)
+	go func() {
+		defer func() {
+			w.mux.Lock()
+			w.jobRunnerGoroutineCount--
+			w.mux.Unlock()
+			w.jobRunnerGoroutineWaitGroup.Done()
 		}()
-		finishedAt := time.Now()
-		w.mux.Lock()
-		delete(w.runningJobs, job.ID)
-		w.mux.Unlock()
-		w.Signal()
-		w.jobResultsChan <- &jobResult{job, startedAt, finishedAt, err}
-	}(job)
+
+		for {
+			select {
+			case job := <-w.jobChan:
+				startedAt := time.Now()
+				var err error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							stack := debug.Stack()
+							err = fmt.Errorf("panic: %v\n%s", r, string(stack))
+						}
+					}()
+					err = job.Type.RunJob(w.cancelCtx, job)
+				}()
+				finishedAt := time.Now()
+				w.jobResultsChan <- &jobResult{job, startedAt, finishedAt, err}
+
+			case <-w.cancelCtx.Done():
+				return
+
+			case <-time.NewTimer(5 * time.Second).C:
+				return
+			}
+		}
+	}()
 }
 
 func (w *Worker) handleWorkerError(err error) {
