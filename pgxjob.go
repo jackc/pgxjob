@@ -325,6 +325,8 @@ type Worker struct {
 
 	jobResultsChan          chan *jobResult
 	writeJobResultsDoneChan chan struct{}
+
+	heartbeatDoneChan chan struct{}
 }
 
 func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
@@ -376,13 +378,14 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	}
 
 	w := &Worker{
-		ID:             workerID,
-		WorkerConfig:   config,
-		group:          group,
-		scheduler:      m,
-		signalChan:     make(chan struct{}, 1),
-		jobChan:        make(chan *Job),
-		jobResultsChan: make(chan *jobResult),
+		ID:                workerID,
+		WorkerConfig:      config,
+		group:             group,
+		scheduler:         m,
+		signalChan:        make(chan struct{}, 1),
+		jobChan:           make(chan *Job),
+		jobResultsChan:    make(chan *jobResult),
+		heartbeatDoneChan: make(chan struct{}),
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
 
@@ -408,6 +411,8 @@ func (w *Worker) Start() error {
 }
 
 func (w *Worker) heartbeat() {
+	defer close(w.heartbeatDoneChan)
+
 	for {
 		select {
 		case <-w.cancelCtx.Done():
@@ -678,14 +683,16 @@ loop2:
 }
 
 // Shutdown stops the worker. It waits for all jobs to finish before returning. Cancel ctx to force shutdown without
-// waiting for jobs to finish.
+// waiting for jobs to finish or worker to cleanup.
 func (w *Worker) Shutdown(ctx context.Context) error {
 	w.cancel()
 
+	// Wait for all worker goroutines to finish.
 	doneChan := make(chan struct{})
 	go func() {
 		w.jobRunnerGoroutineWaitGroup.Wait()
 		<-w.writeJobResultsDoneChan
+		<-w.heartbeatDoneChan
 		close(doneChan)
 	}()
 
@@ -693,7 +700,40 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-doneChan:
-		return nil
+	}
+
+	// Cleanup can't be started until all worker goroutines have finished. Otherwise, the cleanup may unlock a job that is
+	// still being worked on this worker. Another worker could pick up the job and it could be executed multiple times.
+	cleanupErrChan := make(chan error)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
+
+		conn, release, err := w.scheduler.getConnFunc(ctx)
+		if err != nil {
+			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to get connection for cleanup: %w", err)
+			return
+		}
+		defer release()
+
+		batch := &pgx.Batch{}
+		batch.Queue(`delete from pgxjob_workers where id = $1`, w.ID)
+		batch.Queue(`update pgxjob_asap_jobs set worker_id = null where worker_id = $1`, w.ID)
+		batch.Queue(`update pgxjob_run_at_jobs set worker_id = null where worker_id = $1`, w.ID)
+		err = conn.SendBatch(ctx, batch).Close()
+		if err != nil {
+			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to cleanup worker and unlock jobs: %w", err)
+			return
+		}
+
+		close(cleanupErrChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-cleanupErrChan:
+		return err
 	}
 }
 

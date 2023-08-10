@@ -662,6 +662,111 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	require.EqualValues(t, backlogCount, jobsRun)
 }
 
+func TestWorkerShutdown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	jobRanChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			select {
+			case jobRanChan <- struct{}{}:
+			case <-time.After(10 * time.Millisecond):
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	asapBacklogCount := 600
+	for i := 0; i < asapBacklogCount; i++ {
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(t, err)
+	}
+	runAtBacklogCount := 600
+	for i := 0; i < runAtBacklogCount; i++ {
+		err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(-1 * time.Second)})
+		require.NoError(t, err)
+	}
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		MaxConcurrentJobs: 1,
+		MaxPrefetchedJobs: 1000,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	// Wait for at least 10 jobs to have started/run.
+	for i := 0; i < 10; i++ {
+		select {
+		case <-jobRanChan:
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for job to run")
+		}
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	shutdownWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{worker.ID}, pgx.RowTo[bool])
+	require.NoError(t, err)
+	require.Falsef(t, shutdownWorkerExists, "shutdown worker still exists")
+
+	lockedASAPJobs, err := pgxutil.SelectRow(ctx, conn,
+		`select count(*) from pgxjob_asap_jobs where worker_id is not null`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, lockedASAPJobs)
+
+	lockedRunAtJobs, err := pgxutil.SelectRow(ctx, conn,
+		`select count(*) from pgxjob_run_at_jobs where worker_id is not null`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, lockedRunAtJobs)
+
+	unlockedASAPJobs, err := pgxutil.SelectRow(ctx, conn,
+		`select count(*) from pgxjob_asap_jobs where worker_id is null`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+
+	unlockedRunAtJobs, err := pgxutil.SelectRow(ctx, conn,
+		`select count(*) from pgxjob_run_at_jobs where worker_id is null`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+
+	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+
+	require.EqualValues(t, asapBacklogCount+runAtBacklogCount, unlockedASAPJobs+unlockedRunAtJobs+jobsRun)
+
+}
+
 func TestWorkerHeartbeatBeats(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
