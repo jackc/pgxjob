@@ -70,3 +70,5 @@ create table pgxjob_job_runs (
 	error text,
 	primary key (job_id, run_number)
 );
+
+create index pgxjob_job_runs_finished_at_idx on pgxjob_job_runs using brin (job_id);

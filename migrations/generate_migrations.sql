@@ -106,7 +106,9 @@ create table pgxjob_job_runs (
 	params json,
 	error text,
 	primary key (job_id, run_number)
-);$tern_gengen$)
+);
+
+create index pgxjob_job_runs_finished_at_idx on pgxjob_job_runs using brin (job_id);$tern_gengen$)
 
 )
 select up_sql || '
