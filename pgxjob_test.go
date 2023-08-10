@@ -662,6 +662,75 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	require.EqualValues(t, backlogCount, jobsRun)
 }
 
+func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
+	// This test takes a while because it is waiting for something *not* to happen.
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobGroup(ctx, "other")
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{GroupName: "other"})
+	require.NoError(t, err)
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		PollInterval: 500 * time.Millisecond,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	time.Sleep(5 * time.Second)
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	// Our job did run.
+	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, jobsRun)
+
+	// But the other job did not.
+	asapJob, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_asap_jobs`, nil, pgx.RowToAddrOfStructByPos[asapJob])
+	require.NoError(t, err)
+
+	otherGroupID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_groups where name = $1`, []any{"other"}, pgx.RowTo[int32])
+	require.NoError(t, err)
+
+	require.EqualValues(t, otherGroupID, asapJob.GroupID)
+}
+
 func TestWorkerShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
