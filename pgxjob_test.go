@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"testing"
 	"time"
@@ -980,6 +981,173 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 
 	err = <-startErrChan
 	require.NoError(t, err)
+}
+
+// TestStress creates multiple workers and schedules jobs while they are being worked.
+func TestStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	t1JobsQueued := 0
+	t1JobsRan := 0
+	t1JobRanChan := make(chan struct{})
+
+	t2JobsQueued := 0
+	t2JobsRan := 0
+	t2JobRanChan := make(chan struct{})
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobGroup(ctx, "other")
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "t1",
+		RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+			if rand.Intn(100) == 0 {
+				return errors.New("random error")
+			}
+			select {
+			case t1JobRanChan <- struct{}{}:
+			default:
+				return errors.New("t1JobRanChan full")
+			}
+			return nil
+		},
+			1000, 10*time.Millisecond),
+	})
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "t2",
+		RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+			select {
+			case t2JobRanChan <- struct{}{}:
+			default:
+				return errors.New("t2JobRanChan full")
+			}
+			return nil
+		},
+			1000, 10*time.Millisecond),
+	})
+	require.NoError(t, err)
+
+	w1, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("w1: worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	w1StartErrChan := make(chan error)
+	go func() {
+		err := w1.Start()
+		w1StartErrChan <- err
+	}()
+
+	w2, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		MaxConcurrentJobs: 5,
+		MaxPrefetchedJobs: 10,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("w2: worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	w2StartErrChan := make(chan error)
+	go func() {
+		err := w2.Start()
+		w2StartErrChan <- err
+	}()
+
+	w3, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		GroupName: "other",
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("w3: worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	w3StartErrChan := make(chan error)
+	go func() {
+		err := w3.Start()
+		w3StartErrChan <- err
+	}()
+
+	// Schedule a bunch of random jobs.
+	for i := 0; i < 100_000; i++ {
+		n := rand.Intn(100)
+		if n < 5 {
+			scheduler.Schedule(ctx, conn, "t1", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(time.Duration(rand.Intn(1000)) * time.Millisecond)})
+			t1JobsQueued++
+		} else if n < 10 {
+			scheduler.Schedule(ctx, conn, "t1", nil, pgxjob.JobSchedule{GroupName: "other", RunAt: time.Now().Add(time.Duration(rand.Intn(1000)) * time.Millisecond)})
+			t1JobsQueued++
+		} else if n < 15 {
+			scheduler.Schedule(ctx, conn, "t2", nil, pgxjob.JobSchedule{GroupName: "other"})
+			t1JobsQueued++
+		} else if n < 50 {
+			scheduler.ScheduleNow(ctx, conn, "t1", nil)
+			t1JobsQueued++
+		} else {
+			scheduler.ScheduleNow(ctx, conn, "t2", nil)
+			t2JobsQueued++
+		}
+	}
+
+	for t1JobsRan+t2JobsRan < (t1JobsQueued+t2JobsQueued)/2 {
+		select {
+		case <-t1JobRanChan:
+			t1JobsRan++
+		case <-t2JobRanChan:
+			t2JobsRan++
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for jobs to finish: %d completed", t1JobsQueued+t2JobsQueued)
+		}
+	}
+
+	err = w1.Shutdown(ctx)
+	require.NoError(t, err)
+	err = <-w1StartErrChan
+	require.NoError(t, err)
+
+	err = w2.Shutdown(ctx)
+	require.NoError(t, err)
+	err = <-w2StartErrChan
+	require.NoError(t, err)
+
+	err = w3.Shutdown(ctx)
+	require.NoError(t, err)
+	err = <-w3StartErrChan
+	require.NoError(t, err)
+
+	jobsStillPending, err := pgxutil.SelectRow(ctx, conn,
+		`select (select count(*) from pgxjob_asap_jobs) + (select count(*) from pgxjob_run_at_jobs)`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+
+	lockedJobs, err := pgxutil.SelectRow(ctx, conn,
+		`select (select count(*) from pgxjob_asap_jobs where worker_id is not null) + (select count(*) from pgxjob_run_at_jobs where worker_id is not null)`,
+		nil,
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, lockedJobs)
+
+	successfulJobs, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs where error is null`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, (t1JobsQueued + t2JobsQueued), jobsStillPending+successfulJobs)
 }
 
 func TestUnmarshalParams(t *testing.T) {
