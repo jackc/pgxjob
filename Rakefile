@@ -28,8 +28,12 @@ end
 
 task "test:prepare" => "tmp/.test_database_prepared"
 
-task test: "test:prepare" do
-  sh "go test ./..."
+task "test:full" => "test:prepare" do
+  sh "go test -race ./..."
 end
 
-task default: :test
+task "test:short" => "test:prepare" do
+  sh "go test -short ./..."
+end
+
+task default: "test:short"
