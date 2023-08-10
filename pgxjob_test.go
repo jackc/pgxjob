@@ -1048,6 +1048,139 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	require.False(t, jobRun.LastError.Valid)
 }
 
+// This test is actually a benchmark of how much writes the database actually performs. It is used to measure and
+// minimize the number of writes.
+func TestBenchmarkDatabaseWrites(t *testing.T) {
+	if os.Getenv("BENCHMARK_DATABASE_WRITES") == "" {
+		t.Skip("skipping benchmark")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	type pgStatWAL struct {
+		WALRecords int64
+		WALBytes   int64
+		WALWrite   int64
+	}
+
+	type pgStatTable struct {
+		NTupIns  int64
+		NTupUpd  int64
+		NTupDel  int64
+		NDeadTup int64
+	}
+
+	startStatWAL, err := pgxutil.SelectRow(ctx, conn, `select wal_records, wal_bytes, wal_write from pg_stat_wal`, nil, pgx.RowToStructByPos[pgStatWAL])
+	require.NoError(t, err)
+
+	startStatTable, err := pgxutil.SelectRow(ctx, conn, `select n_tup_ins, n_tup_upd, n_tup_del, n_dead_tup from pg_stat_all_tables where relname = 'pgxjob_asap_jobs'`, nil, pgx.RowToStructByPos[pgStatTable])
+	require.NoError(t, err)
+
+	jobRanChan := make(chan struct{}, 100)
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			jobRanChan <- struct{}{}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	totalJobs := 0
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+		ShouldLogJobRun: func(worker *pgxjob.Worker, job *pgxjob.Job, startTime, endTime time.Time, err error) bool {
+			return false
+		},
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	listener := &pgxlisten.Listener{
+		Connect: func(ctx context.Context) (*pgx.Conn, error) {
+			return pgx.Connect(ctx, fmt.Sprintf("dbname=%s", os.Getenv("PGXJOB_TEST_DATABASE")))
+		},
+	}
+
+	listener.Handle(pgxjob.PGNotifyChannel, worker)
+
+	listenerCtx, listenerCtxCancel := context.WithCancel(ctx)
+	defer listenerCtxCancel()
+	listenErrChan := make(chan error)
+	go func() {
+		err := listener.Listen(listenerCtx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			listenErrChan <- err
+		}
+		close(listenErrChan)
+	}()
+
+	for i := 0; i < 100_000; i++ {
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(t, err)
+		totalJobs++
+	}
+
+	for i := 0; i < totalJobs; i++ {
+		select {
+		case <-jobRanChan:
+		case <-time.After(30 * time.Second):
+			t.Fatal("timed out waiting for job to run")
+		}
+	}
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	pendingASAPJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_asap_jobs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, pendingASAPJobsCount)
+
+	pendingRunAtJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_run_at_jobs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, pendingRunAtJobsCount)
+
+	jobRunsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 0, jobRunsCount)
+
+	listenerCtxCancel()
+	err = <-listenErrChan
+	require.NoError(t, err)
+
+	endStatWAL, err := pgxutil.SelectRow(ctx, conn, `select wal_records, wal_bytes, wal_write from pg_stat_wal`, nil, pgx.RowToStructByPos[pgStatWAL])
+	require.NoError(t, err)
+
+	endStatTable, err := pgxutil.SelectRow(ctx, conn, `select n_tup_ins, n_tup_upd, n_tup_del, n_dead_tup from pg_stat_all_tables where relname = 'pgxjob_asap_jobs'`, nil, pgx.RowToStructByPos[pgStatTable])
+	require.NoError(t, err)
+
+	t.Logf("wal_records: %d", endStatWAL.WALRecords-startStatWAL.WALRecords)
+	t.Logf("wal_bytes: %d", endStatWAL.WALBytes-startStatWAL.WALBytes)
+	t.Logf("wal_write: %d", endStatWAL.WALWrite-startStatWAL.WALWrite)
+	t.Logf("n_tup_ins: %d", endStatTable.NTupIns-startStatTable.NTupIns)
+	t.Logf("n_tup_upd: %d", endStatTable.NTupUpd-startStatTable.NTupUpd)
+	t.Logf("n_tup_del: %d", endStatTable.NTupDel-startStatTable.NTupDel)
+	t.Logf("n_dead_tup: %d", endStatTable.NDeadTup-startStatTable.NDeadTup)
+}
+
 // TestStress creates multiple workers and schedules jobs while they are being worked.
 func TestStress(t *testing.T) {
 	if testing.Short() {
