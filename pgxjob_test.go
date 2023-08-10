@@ -1075,6 +1075,10 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 		NDeadTup int64
 	}
 
+	// Start with a clean database and stats.
+	_, err := conn.Exec(ctx, `vacuum full analyze`)
+	require.NoError(t, err)
+
 	startStatWAL, err := pgxutil.SelectRow(ctx, conn, `select wal_records, wal_bytes, wal_write from pg_stat_wal`, nil, pgx.RowToStructByPos[pgStatWAL])
 	require.NoError(t, err)
 
