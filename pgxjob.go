@@ -437,7 +437,17 @@ func (w *Worker) heartbeat() {
 
 					_, err = conn.Exec(ctx, `with t as (
 	delete from pgxjob_workers where heartbeat + $1 < now() returning id
-				) select * from t`, w.workerDeadWithoutHeartbeatDuration)
+), u1 as (
+	update pgxjob_asap_jobs
+	set worker_id = null
+	from t
+	where worker_id = t.id
+)
+update pgxjob_run_at_jobs
+set worker_id = null
+from t
+where worker_id = t.id
+`, w.workerDeadWithoutHeartbeatDuration)
 					if err != nil {
 						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.ID, err)
 					}

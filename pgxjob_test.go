@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgxjob"
 	"github.com/jackc/pgxutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -75,12 +76,15 @@ func mustCleanDatabase(t testing.TB, conn *pgx.Conn) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := conn.Exec(ctx, `delete from pgxjob_asap_jobs`)
-	require.NoError(t, err)
-	_, err = conn.Exec(ctx, `delete from pgxjob_run_at_jobs`)
-	require.NoError(t, err)
-	_, err = conn.Exec(ctx, `delete from pgxjob_job_runs`)
-	require.NoError(t, err)
+	for _, table := range []string{
+		"pgxjob_workers",
+		"pgxjob_asap_jobs",
+		"pgxjob_run_at_jobs",
+		"pgxjob_job_runs",
+	} {
+		_, err := conn.Exec(ctx, fmt.Sprintf("delete from %s", table))
+		require.NoErrorf(t, err, "error cleaning table %s", table)
+	}
 }
 
 type asapJob struct {
@@ -700,6 +704,102 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 		heartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
 		require.NoError(t, err)
 		return heartbeat.After(firstHeartbeat)
+	}, 5*time.Second, 100*time.Millisecond)
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+}
+
+func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(-30 * time.Minute)})
+	require.NoError(t, err)
+
+	deadWorkerID, err := pgxutil.InsertRowReturning(ctx, conn,
+		"pgxjob_workers",
+		map[string]any{"heartbeat": time.Now().Add(-time.Hour)},
+		"id",
+		pgx.RowTo[int32],
+	)
+	require.NoError(t, err)
+
+	err = pgxutil.UpdateRow(ctx, conn,
+		"pgxjob_asap_jobs",
+		map[string]any{"inserted_at": time.Now().Add(-time.Hour), "worker_id": deadWorkerID},
+		nil,
+	)
+	require.NoError(t, err)
+
+	err = pgxutil.UpdateRow(ctx, conn,
+		"pgxjob_run_at_jobs",
+		map[string]any{"inserted_at": time.Now().Add(-time.Hour), "worker_id": deadWorkerID},
+		nil,
+	)
+	require.NoError(t, err)
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		PollInterval: 500 * time.Millisecond,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	worker.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
+	worker.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		deadWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{deadWorkerID}, pgx.RowTo[bool])
+		assert.NoError(c, err)
+		assert.Falsef(c, deadWorkerExists, "dead worker still exists")
+
+		asapJobsStillPending, err := pgxutil.SelectRow(ctx, conn,
+			`select count(*) from pgxjob_asap_jobs`,
+			nil,
+			pgx.RowTo[int32],
+		)
+		assert.NoError(c, err)
+		assert.EqualValuesf(c, 0, asapJobsStillPending, "asap jobs still pending")
+
+		runAtJobsStillPending, err := pgxutil.SelectRow(ctx, conn,
+			`select count(*) from pgxjob_run_at_jobs`,
+			nil,
+			pgx.RowTo[int32],
+		)
+		assert.NoError(c, err)
+		assert.EqualValuesf(c, 0, runAtJobsStillPending, "run at jobs still pending")
+
+		jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+		assert.NoError(c, err)
+		assert.EqualValues(c, 2, jobsRun)
 	}, 5*time.Second, 100*time.Millisecond)
 
 	worker.Shutdown(context.Background())
