@@ -1082,7 +1082,7 @@ func TestStress(t *testing.T) {
 			}
 			select {
 			case t1JobRanChan <- struct{}{}:
-			default:
+			case <-time.NewTimer(100 * time.Millisecond).C:
 				return errors.New("t1JobRanChan full")
 			}
 			return nil
@@ -1096,7 +1096,7 @@ func TestStress(t *testing.T) {
 		RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
 			select {
 			case t2JobRanChan <- struct{}{}:
-			default:
+			case <-time.NewTimer(100 * time.Millisecond).C:
 				return errors.New("t2JobRanChan full")
 			}
 			return nil
@@ -1175,7 +1175,7 @@ func TestStress(t *testing.T) {
 		case <-t2JobRanChan:
 			t2JobsRan++
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for jobs to finish: %d completed", t1JobsQueued+t2JobsQueued)
+			t.Fatalf("timed out waiting for jobs to finish: %d completed", t1JobsRan+t2JobsRan)
 		}
 	}
 
