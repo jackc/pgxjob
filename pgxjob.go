@@ -299,6 +299,10 @@ type WorkerConfig struct {
 	// again later when the network may have been restored. These types of errors are passed to HandleWorkerError.
 	HandleWorkerError func(worker *Worker, err error)
 
+	// ShouldLogJobRun is called for every job run. If it returns true then the run is logged to the pgxjob_job_runs
+	// table. If it returns false it is not. If not set all job runs are logged.
+	ShouldLogJobRun func(worker *Worker, job *Job, startTime, endTime time.Time, err error) bool
+
 	minHeartbeatDelay                  time.Duration
 	heartbeatDelayJitter               time.Duration
 	workerDeadWithoutHeartbeatDuration time.Duration
@@ -537,18 +541,20 @@ func (w *Worker) writeJobResults() {
 					}
 				}
 			}
-			pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
-				JobID:      job.ID,
-				InsertedAt: job.InsertedAt,
-				RunAt:      job.RunAt,
-				StartedAt:  jobResult.startTime,
-				FinishedAt: jobResult.finishedAt,
-				RunNumber:  job.ErrorCount + 1,
-				GroupID:    job.Group.ID,
-				TypeID:     job.Type.ID,
-				Params:     job.Params,
-				Error:      errForInsert,
-			})
+			if w.ShouldLogJobRun == nil || w.ShouldLogJobRun(w, job, jobResult.startTime, jobResult.finishedAt, jobResult.err) {
+				pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
+					JobID:      job.ID,
+					InsertedAt: job.InsertedAt,
+					RunAt:      job.RunAt,
+					StartedAt:  jobResult.startTime,
+					FinishedAt: jobResult.finishedAt,
+					RunNumber:  job.ErrorCount + 1,
+					GroupID:    job.Group.ID,
+					TypeID:     job.Type.ID,
+					Params:     job.Params,
+					Error:      errForInsert,
+				})
+			}
 		}
 
 		batch := &pgx.Batch{}
@@ -1026,4 +1032,15 @@ func RetryLinearBackoff(runJob RunJobFunc, maxRetries int32, baseDelay time.Dura
 			RetryAt: time.Now().Add(time.Duration(job.ErrorCount+1) * baseDelay),
 		}
 	})
+}
+
+// LogFinalJobRuns is a ShouldLogJobRun function that returns true for the final run of a job. That is, the run was
+// successful or it failed and will not try again.
+func LogFinalJobRuns(worker *Worker, job *Job, startTime, endTime time.Time, err error) bool {
+	if err == nil {
+		return true
+	}
+
+	var errorWithRetry *ErrorWithRetry
+	return !errors.As(err, &errorWithRetry)
 }

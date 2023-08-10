@@ -983,6 +983,70 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestWorkerShouldLogJobRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(t, err)
+
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			if job.ErrorCount == 0 {
+				return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("failed first time"), RetryAt: time.Now().Add(100 * time.Millisecond)}
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		PollInterval: 50 * time.Millisecond,
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			t.Errorf("worker error: %v", err)
+		},
+		ShouldLogJobRun: pgxjob.LogFinalJobRuns,
+	})
+	require.NoError(t, err)
+
+	startErrChan := make(chan error)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		jobsStillPending, err := pgxutil.SelectRow(ctx, conn,
+			`select (select count(*) from pgxjob_asap_jobs) + (select count(*) from pgxjob_run_at_jobs)`,
+			nil,
+			pgx.RowTo[int32],
+		)
+		assert.NoError(c, err)
+		assert.EqualValues(c, 0, jobsStillPending)
+	}, 30*time.Second, 100*time.Millisecond)
+
+	worker.Shutdown(context.Background())
+
+	err = <-startErrChan
+	require.NoError(t, err)
+
+	jobRunsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValuesf(t, 1, jobRunsCount, "only one job run should have been logged")
+
+	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[jobRun])
+	require.NoError(t, err)
+	require.False(t, jobRun.LastError.Valid)
+}
+
 // TestStress creates multiple workers and schedules jobs while they are being worked.
 func TestStress(t *testing.T) {
 	if testing.Short() {
