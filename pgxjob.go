@@ -318,7 +318,7 @@ type Worker struct {
 
 	mux                     sync.Mutex
 	jobRunnerGoroutineCount int
-	running                 bool
+	started                 bool
 
 	jobRunnerGoroutineWaitGroup sync.WaitGroup
 	jobChan                     chan *Job
@@ -326,7 +326,8 @@ type Worker struct {
 	jobResultsChan          chan *jobResult
 	writeJobResultsDoneChan chan struct{}
 
-	heartbeatDoneChan chan struct{}
+	heartbeatDoneChan         chan struct{}
+	fetchAndStartJobsDoneChan chan struct{}
 }
 
 func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
@@ -378,14 +379,15 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	}
 
 	w := &Worker{
-		ID:                workerID,
-		WorkerConfig:      config,
-		group:             group,
-		scheduler:         m,
-		signalChan:        make(chan struct{}, 1),
-		jobChan:           make(chan *Job),
-		jobResultsChan:    make(chan *jobResult),
-		heartbeatDoneChan: make(chan struct{}),
+		ID:                        workerID,
+		WorkerConfig:              config,
+		group:                     group,
+		scheduler:                 m,
+		signalChan:                make(chan struct{}, 1),
+		jobChan:                   make(chan *Job),
+		jobResultsChan:            make(chan *jobResult),
+		heartbeatDoneChan:         make(chan struct{}),
+		fetchAndStartJobsDoneChan: make(chan struct{}),
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
 
@@ -395,11 +397,11 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 // Start starts the worker. It runs until Shutdown is called. One worker cannot Start multiple times concurrently.
 func (w *Worker) Start() error {
 	w.mux.Lock()
-	if w.running {
+	if w.started {
 		w.mux.Unlock()
-		return fmt.Errorf("pgxjob: worker already running")
+		return fmt.Errorf("pgxjob: worker cannot be started more than once")
 	}
-	w.running = true
+	w.started = true
 	w.mux.Unlock()
 
 	go w.heartbeat()
@@ -665,6 +667,11 @@ loop1:
 
 	doneChan := make(chan struct{})
 	go func() {
+		// must be done before waiting for w.jobRunnerGoroutineWaitGroup because fetchAndStartJobs can start a job worker
+		// which calls w.jobRunnerGoroutineWaitGroup.Add. From the docs for Add: "Note that calls with a positive delta that
+		// occur when the counter is zero must happen before a Wait." Violating this rule can cause a race condtion.
+		<-w.fetchAndStartJobsDoneChan
+
 		w.jobRunnerGoroutineWaitGroup.Wait()
 		close(doneChan)
 	}()
@@ -690,6 +697,11 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 	// Wait for all worker goroutines to finish.
 	doneChan := make(chan struct{})
 	go func() {
+		// must be done before waiting for w.jobRunnerGoroutineWaitGroup because fetchAndStartJobs can start a job worker
+		// which calls w.jobRunnerGoroutineWaitGroup.Add. From the docs for Add: "Note that calls with a positive delta that
+		// occur when the counter is zero must happen before a Wait." Violating this rule can cause a race condtion.
+		<-w.fetchAndStartJobsDoneChan
+
 		w.jobRunnerGoroutineWaitGroup.Wait()
 		<-w.writeJobResultsDoneChan
 		<-w.heartbeatDoneChan
@@ -757,6 +769,8 @@ type jobResult struct {
 }
 
 func (w *Worker) fetchAndStartJobs() error {
+	defer close(w.fetchAndStartJobsDoneChan)
+
 	for {
 		// Check if the context is done before processing any jobs.
 		select {
