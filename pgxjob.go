@@ -237,7 +237,8 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 	if schedule.RunAt.IsZero() {
 		batch := &pgx.Batch{}
 		batch.Queue(
-			`insert into pgxjob_asap_jobs (group_id, type_id, params) values ($1, $2, $3)`,
+			`insert into pgxjob_asap_jobs (group_id, type_id, params, worker_id)
+values ($1, $2, $3, (select id from pgxjob_workers where group_id = $1 order by random() limit 1))`,
 			jobGroup.ID, jobType.ID, jobParams,
 		)
 		batch.Queue(`select pg_notify($1, $2)`, PGNotifyChannel, jobGroup.Name)
@@ -324,6 +325,9 @@ type Worker struct {
 	jobRunnerGoroutineCount int
 	started                 bool
 
+	runningJobsMux sync.Mutex
+	runningJobIDs  map[int64]struct{}
+
 	jobRunnerGoroutineWaitGroup sync.WaitGroup
 	jobChan                     chan *Job
 
@@ -374,8 +378,8 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	}
 	defer release()
 	workerID, err := pgxutil.SelectRow(ctx, conn,
-		`insert into pgxjob_workers (heartbeat) values (now()) returning id`,
-		nil,
+		`insert into pgxjob_workers (heartbeat, group_id) values (now(), $1) returning id`,
+		[]any{group.ID},
 		pgx.RowTo[int32],
 	)
 	if err != nil {
@@ -388,6 +392,7 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 		group:                     group,
 		scheduler:                 m,
 		signalChan:                make(chan struct{}, 1),
+		runningJobIDs:             make(map[int64]struct{}, config.MaxConcurrentJobs+config.MaxPrefetchedJobs),
 		jobChan:                   make(chan *Job),
 		jobResultsChan:            make(chan *jobResult),
 		heartbeatDoneChan:         make(chan struct{}),
@@ -502,6 +507,12 @@ func (w *Worker) writeJobResults() {
 
 		// Always clear the results even if there is an error. In case of error there is nothing that can be done.
 		defer func() {
+			w.runningJobsMux.Lock()
+			for _, jr := range jobResults {
+				delete(w.runningJobIDs, jr.job.ID)
+			}
+			w.runningJobsMux.Unlock()
+
 			clear(jobResults)
 			jobResults = jobResults[:0]
 			clear(asapJobIDsToDelete)
@@ -778,6 +789,11 @@ func (w *Worker) fetchAndStartJobs() error {
 			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch jobs: %w", err))
 		}
 		noJobsAvailableInDatabase := len(jobs) < w.MaxPrefetchedJobs
+		w.runningJobsMux.Lock()
+		for _, job := range jobs {
+			w.runningJobIDs[job.ID] = struct{}{}
+		}
+		w.runningJobsMux.Unlock()
 
 		for _, job := range jobs {
 			select {
@@ -808,6 +824,16 @@ func (w *Worker) fetchAndStartJobs() error {
 		}
 	}
 }
+
+// fetchPrelockedASAPJobsSQL is used to fetch pgxjob_asap_jobs that were prelocked by Schedule. It takes 4 bound
+// parameters. $1 is group id. $2 is worker_id. $3 is an array of job IDs the worker is already working. $4 is the
+// maximum number of jobs to fetch. ids.
+const fetchPrelockedASAPJobsSQL = `select id, type_id, params, inserted_at
+from pgxjob_asap_jobs
+where group_id = $1
+	and worker_id = $2
+	and not id = any ($3)
+limit $4`
 
 // fetchAndLockASAPJobsSQL is used to fetch and lock pgxjob_asap_jobs in a single query. It takes 3 bound parameters. $1
 // is group id. $2 is the maximum number of jobs to fetch. $3 is worker_id that is locking the job.
@@ -870,29 +896,54 @@ func (w *Worker) fetchJobs() ([]*Job, error) {
 		}
 	}
 
+	runningJobIDs := []int64{} // Important to use empty slice instead of nil because of NULL behavior in SQL.
+	w.runningJobsMux.Lock()
+	for jobID := range w.runningJobIDs {
+		runningJobIDs = append(runningJobIDs, jobID)
+	}
+	w.runningJobsMux.Unlock()
+
+	rowToASAPJob := func(row pgx.CollectableRow) (*Job, error) {
+		var job Job
+		var jobTypeID int32
+		err := row.Scan(
+			&job.ID, &jobTypeID, &job.Params, &job.InsertedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		job.RunAt = job.InsertedAt
+		job.ASAP = true
+
+		job.Group = w.group
+		job.Type = jobTypeFromID(jobTypeID)
+
+		return &job, nil
+	}
+
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
-		fetchAndLockASAPJobsSQL,
-		[]any{w.group.ID, w.MaxPrefetchedJobs, w.ID},
-		func(row pgx.CollectableRow) (*Job, error) {
-			var job Job
-			var jobTypeID int32
-			err := row.Scan(
-				&job.ID, &jobTypeID, &job.Params, &job.InsertedAt,
-			)
-			if err != nil {
-				return nil, err
-			}
-			job.RunAt = job.InsertedAt
-			job.ASAP = true
-
-			job.Group = w.group
-			job.Type = jobTypeFromID(jobTypeID)
-
-			return &job, nil
-		},
+		fetchPrelockedASAPJobsSQL,
+		[]any{w.group.ID, w.ID, runningJobIDs, w.MaxPrefetchedJobs},
+		rowToASAPJob,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch and lock pgxjob_asap_jobs: %w", err)
+		return nil, fmt.Errorf("failed to fetch prelocked pgxjob_asap_jobs: %w", err)
+	}
+
+	if len(jobs) < w.MaxPrefetchedJobs {
+		asapJobs, err := pgxutil.Select(w.cancelCtx, conn,
+			fetchAndLockASAPJobsSQL,
+			[]any{w.group.ID, w.MaxPrefetchedJobs, w.ID},
+			rowToASAPJob,
+		)
+		if err != nil {
+			// If some jobs were successfully locked. Return those without an error.
+			if len(jobs) > 0 {
+				return jobs, nil
+			}
+			return nil, fmt.Errorf("failed to fetch and lock pgxjob_asap_jobs: %w", err)
+		}
+		jobs = append(jobs, asapJobs...)
 	}
 
 	if len(jobs) < w.MaxPrefetchedJobs {

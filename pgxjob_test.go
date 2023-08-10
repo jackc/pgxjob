@@ -913,9 +913,12 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{RunAt: time.Now().Add(-30 * time.Minute)})
 	require.NoError(t, err)
 
+	groupID, err := pgxutil.SelectRow(ctx, conn, `select id from pgxjob_groups limit 1`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+
 	deadWorkerID, err := pgxutil.InsertRowReturning(ctx, conn,
 		"pgxjob_workers",
-		map[string]any{"heartbeat": time.Now().Add(-time.Hour)},
+		map[string]any{"heartbeat": time.Now().Add(-time.Hour), "group_id": groupID},
 		"id",
 		pgx.RowTo[int32],
 	)
@@ -1536,6 +1539,10 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 		}
 		close(listenErrChan)
 	}()
+
+	// Wait a little for the listener to start. Otherwise we might miss the first notification which would the first
+	// benchmark where b.N == 1 to take PollDuration time.
+	time.Sleep(time.Second)
 
 	b.ResetTimer()
 

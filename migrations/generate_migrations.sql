@@ -48,7 +48,8 @@ create table pgxjob_types (
 create table pgxjob_workers (
 	id int primary key,
 	inserted_at timestamptz not null default now(),
-	heartbeat timestamptz not null
+	heartbeat timestamptz not null,
+	group_id int not null references pgxjob_groups
 );
 
 create sequence pgxjob_workers_id_seq as int cycle owned by pgxjob_workers.id;
