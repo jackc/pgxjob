@@ -21,10 +21,6 @@ import (
 const pgChannelName = "pgxjob_job_available"
 const defaultGroupName = "default"
 
-var minWorkerHeartbeatDelay = 45 * time.Second
-var workerHeartbeatDelayJitter = 30 * time.Second
-var workerDeadWithoutHeartbeatDuration = 5 * (minWorkerHeartbeatDelay + workerHeartbeatDelayJitter)
-
 // Scheduler is used to schedule jobs and start workers.
 type Scheduler struct {
 	getConnFunc GetConnFunc
@@ -302,6 +298,10 @@ type WorkerConfig struct {
 	// the outcome of an execution. The Worker.Run execution should not be stopped because of this. Instead, it should try
 	// again later when the network may have been restored. These types of errors are passed to HandleWorkerError.
 	HandleWorkerError func(worker *Worker, err error)
+
+	minHeartbeatDelay                  time.Duration
+	heartbeatDelayJitter               time.Duration
+	workerDeadWithoutHeartbeatDuration time.Duration
 }
 
 type Worker struct {
@@ -357,6 +357,10 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 		config.MaxBufferedJobResultAge = 1 * time.Second
 	}
 
+	config.minHeartbeatDelay = 45 * time.Second
+	config.heartbeatDelayJitter = 30 * time.Second
+	config.workerDeadWithoutHeartbeatDuration = 5 * (config.minHeartbeatDelay + config.heartbeatDelayJitter)
+
 	conn, release, err := m.getConnFunc(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pgxjob: failed to get connection: %w", err)
@@ -408,7 +412,7 @@ func (w *Worker) heartbeat() {
 		select {
 		case <-w.cancelCtx.Done():
 			return
-		case <-time.After(minWorkerHeartbeatDelay + time.Duration(rand.Int63n(int64(workerHeartbeatDelayJitter)))):
+		case <-time.After(w.minHeartbeatDelay + time.Duration(rand.Int63n(int64(w.heartbeatDelayJitter)))):
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -433,7 +437,7 @@ func (w *Worker) heartbeat() {
 
 					_, err = conn.Exec(ctx, `with t as (
 	delete from pgxjob_workers where heartbeat + $1 < now() returning id
-				) select * from t`, workerDeadWithoutHeartbeatDuration)
+				) select * from t`, w.workerDeadWithoutHeartbeatDuration)
 					if err != nil {
 						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.ID, err)
 					}

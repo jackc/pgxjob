@@ -659,9 +659,6 @@ func TestWorkerRunsBacklog(t *testing.T) {
 }
 
 func TestWorkerHeartbeatBeats(t *testing.T) {
-	pgxjob.SetMinWorkerHeartbeatDelayForTest(t, 50*time.Millisecond)
-	pgxjob.SetWorkerHeartbeatDelayJitterForTest(t, 50*time.Millisecond)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -686,6 +683,9 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+
+	worker.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
+	worker.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
 
 	firstHeartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
 	require.NoError(t, err)
