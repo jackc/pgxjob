@@ -1281,6 +1281,93 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	require.NoError(b, err)
 }
 
+func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	conn := mustConnect(b)
+	mustCleanDatabase(b, conn)
+	dbpool := mustNewDBPool(b)
+
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	require.NoError(b, err)
+
+	runJobChan := make(chan struct{}, 100)
+	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
+		Name: "test",
+		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+			runJobChan <- struct{}{}
+			return nil
+		},
+	})
+	require.NoError(b, err)
+
+	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
+			b.Errorf("worker error: %v", err)
+		},
+	})
+	require.NoError(b, err)
+	defer worker.Shutdown(context.Background())
+
+	startErrChan := make(chan error, 1)
+	go func() {
+		err := worker.Start()
+		startErrChan <- err
+	}()
+
+	listenConn := mustConnect(b)
+	_, err = listenConn.Exec(ctx, "listen "+pgxjob.PGNotifyChannel)
+	require.NoError(b, err)
+
+	listenConnCtx, listenConnCtxCancel := context.WithCancel(ctx)
+	listenErrChan := make(chan error)
+	go func() {
+		for {
+			notification, err := listenConn.WaitForNotification(listenConnCtx)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					close(listenErrChan)
+				} else {
+					listenErrChan <- err
+				}
+				return
+			}
+			if notification.Channel == pgxjob.PGNotifyChannel {
+				worker.Signal()
+			}
+		}
+	}()
+	defer listenConnCtxCancel()
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+		require.NoError(b, err)
+	}
+
+	for i := 0; i < b.N; i++ {
+		select {
+		case <-runJobChan:
+		case err := <-startErrChan:
+			b.Fatalf("startErrChan: %v", err)
+		case <-ctx.Done():
+			b.Fatalf("timed out waiting for jobs to finish: %d", i)
+		}
+	}
+
+	err = worker.Shutdown(context.Background())
+	require.NoError(b, err)
+
+	err = <-startErrChan
+	require.NoError(b, err)
+
+	listenConnCtxCancel()
+	err = <-listenErrChan
+	require.NoError(b, err)
+}
+
 func benchmarkPostgreSQLParamsInsert(b *testing.B, params_type string) {
 	ctx := context.Background()
 	conn := mustConnect(b)

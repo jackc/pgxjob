@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgxutil"
 )
 
-const pgChannelName = "pgxjob_job_available"
+const PGNotifyChannel = "pgxjob_job_available"
 const defaultGroupName = "default"
 
 // Scheduler is used to schedule jobs and start workers.
@@ -240,7 +240,7 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 			`insert into pgxjob_asap_jobs (group_id, type_id, params) values ($1, $2, $3)`,
 			jobGroup.ID, jobType.ID, jobParams,
 		)
-		batch.Queue(`select pg_notify($1, null)`, pgChannelName)
+		batch.Queue(`select pg_notify($1, null)`, PGNotifyChannel)
 		err := db.SendBatch(ctx, batch).Close()
 		if err != nil {
 			return fmt.Errorf("pgxjob: failed to schedule asap job: %w", err)
