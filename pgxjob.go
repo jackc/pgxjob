@@ -442,19 +442,7 @@ func (w *Worker) heartbeat() {
 						return fmt.Errorf("pgxjob: heartbeat for %d: failed to update: %w", w.ID, err)
 					}
 
-					_, err = conn.Exec(ctx, `with t as (
-	delete from pgxjob_workers where heartbeat + $1 < now() returning id
-), u1 as (
-	update pgxjob_asap_jobs
-	set worker_id = null
-	from t
-	where worker_id = t.id
-)
-update pgxjob_run_at_jobs
-set worker_id = null
-from t
-where worker_id = t.id
-`, w.workerDeadWithoutHeartbeatDuration)
+					_, err = conn.Exec(ctx, `delete from pgxjob_workers where heartbeat + $1 < now()`, w.workerDeadWithoutHeartbeatDuration)
 					if err != nil {
 						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.ID, err)
 					}
@@ -728,13 +716,9 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 		}
 		defer release()
 
-		batch := &pgx.Batch{}
-		batch.Queue(`delete from pgxjob_workers where id = $1`, w.ID)
-		batch.Queue(`update pgxjob_asap_jobs set worker_id = null where worker_id = $1`, w.ID)
-		batch.Queue(`update pgxjob_run_at_jobs set worker_id = null where worker_id = $1`, w.ID)
-		err = conn.SendBatch(ctx, batch).Close()
+		_, err = conn.Exec(ctx, `delete from pgxjob_workers where id = $1`, w.ID)
 		if err != nil {
-			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to cleanup worker and unlock jobs: %w", err)
+			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to cleanup worker: %w", err)
 			return
 		}
 

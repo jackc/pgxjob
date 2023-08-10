@@ -32,7 +32,7 @@ create table pgxjob_asap_jobs (
 	inserted_at timestamptz not null default now(),
 	group_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_groups rows are never deleted.
 	type_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_types rows are never deleted.
-	worker_id int, -- purposely not a foreign key for best insert performance. pgxjob_workers rows are only deleted in the same transaction that clears the worker.
+	worker_id int references pgxjob_workers on delete set null,
 	params json -- use json instead of jsonb as it is faster for insert.
 );
 
@@ -44,7 +44,7 @@ create table pgxjob_run_at_jobs (
 	next_run_at timestamptz not null,
 	group_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_groups rows are never deleted.
 	type_id int not null, -- purposely not a foreign key for best insert performance. pgxjob_types rows are never deleted.
-	worker_id int, -- purposely not a foreign key for best insert performance. pgxjob_workers rows are only deleted in the same transaction that clears the worker.
+	worker_id int references pgxjob_workers on delete set null,
 	error_count int not null,
 	last_error text,
 	params json -- use json instead of jsonb as it is faster for insert.
