@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgxjob"
+	"github.com/jackc/pgxlisten"
 	"github.com/jackc/pgxutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1380,29 +1381,24 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 		startErrChan <- err
 	}()
 
-	listenConn := mustConnect(b)
-	_, err = listenConn.Exec(ctx, "listen "+pgxjob.PGNotifyChannel)
-	require.NoError(b, err)
+	listener := &pgxlisten.Listener{
+		Connect: func(ctx context.Context) (*pgx.Conn, error) {
+			return pgx.Connect(ctx, fmt.Sprintf("dbname=%s", os.Getenv("PGXJOB_TEST_DATABASE")))
+		},
+	}
 
-	listenConnCtx, listenConnCtxCancel := context.WithCancel(ctx)
+	listener.Handle(pgxjob.PGNotifyChannel, worker)
+
+	listenerCtx, listenerCtxCancel := context.WithCancel(ctx)
+	defer listenerCtxCancel()
 	listenErrChan := make(chan error)
 	go func() {
-		for {
-			notification, err := listenConn.WaitForNotification(listenConnCtx)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					close(listenErrChan)
-				} else {
-					listenErrChan <- err
-				}
-				return
-			}
-			if notification.Channel == pgxjob.PGNotifyChannel {
-				worker.Signal()
-			}
+		err := listener.Listen(listenerCtx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			listenErrChan <- err
 		}
+		close(listenErrChan)
 	}()
-	defer listenConnCtxCancel()
 
 	b.ResetTimer()
 
@@ -1427,7 +1423,7 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	err = <-startErrChan
 	require.NoError(b, err)
 
-	listenConnCtxCancel()
+	listenerCtxCancel()
 	err = <-listenErrChan
 	require.NoError(b, err)
 }

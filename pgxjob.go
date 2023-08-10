@@ -240,7 +240,7 @@ func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, job
 			`insert into pgxjob_asap_jobs (group_id, type_id, params) values ($1, $2, $3)`,
 			jobGroup.ID, jobType.ID, jobParams,
 		)
-		batch.Queue(`select pg_notify($1, null)`, PGNotifyChannel)
+		batch.Queue(`select pg_notify($1, $2)`, PGNotifyChannel, jobGroup.Name)
 		err := db.SendBatch(ctx, batch).Close()
 		if err != nil {
 			return fmt.Errorf("pgxjob: failed to schedule asap job: %w", err)
@@ -975,12 +975,23 @@ func (w *Worker) handleWorkerError(err error) {
 	}
 }
 
-// Signal causes the worker to wake up and process requests. It is safe to call this from multiple goroutines.
+// Signal causes the worker to wake up and process requests. It is safe to call this from multiple goroutines. It does
+// not block.
 func (w *Worker) Signal() {
 	select {
 	case w.signalChan <- struct{}{}:
 	default:
 	}
+}
+
+// HandleNotification implements the pgxlisten.Handler interface. This allows a Worker to be used as a
+// pgxlisten.Listener. When it receives a notification for the worker's job group it calls Signal.
+func (w *Worker) HandleNotification(ctx context.Context, notification *pgconn.Notification, conn *pgx.Conn) error {
+	if notification.Payload == w.group.Name {
+		w.Signal()
+	}
+
+	return nil
 }
 
 type ErrorWithRetry struct {

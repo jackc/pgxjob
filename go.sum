@@ -7,6 +7,8 @@ github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a h1:bbPeKD0xmW/
 github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a/go.mod h1:5TJZWKEWniPve33vlWYSoGYefn3gLQRzjfDlhSJ9ZKM=
 github.com/jackc/pgx/v5 v5.4.2 h1:u1gmGDwbdRUZiwisBm/Ky2M14uQyUP65bG8+20nnyrg=
 github.com/jackc/pgx/v5 v5.4.2/go.mod h1:q6iHT8uDNXWiFNOlRqJzBTaSH3+2xCXkokxHZC5qWFY=
+github.com/jackc/pgxlisten v0.0.0-20230728233309-2632bad3185a h1:Di9X9kIB5WbWxOJLai5MDj0AmA6bKSM0GsHRCqs41rI=
+github.com/jackc/pgxlisten v0.0.0-20230728233309-2632bad3185a/go.mod h1:EqjCOzkITPCEI0My7BdE2xm3r0fZ7OZycVDP+ki1ASA=
 github.com/jackc/pgxutil v0.0.0-20230722221055-3c9f5efec167 h1:+6z8OAwZnCJEcy0RVqg+Xf/4iyzQeO5mTwTQ2oN0Icc=
 github.com/jackc/pgxutil v0.0.0-20230722221055-3c9f5efec167/go.mod h1:/ezerYvY+yygB2Jupuzbgbj+VMX2Idgm0VGIEaSnwsw=
 github.com/jackc/puddle/v2 v2.2.0 h1:RdcDk92EJBuBS55nQMMYFXTxwstHug4jkhT5pq8VxPk=
