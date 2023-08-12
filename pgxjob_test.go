@@ -135,7 +135,9 @@ func TestASAPEndToEnd(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -222,7 +224,9 @@ func TestRunAtEndToEnd(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -311,7 +315,9 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -397,7 +403,9 @@ func TestJobFailedNoRetry(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -474,7 +482,9 @@ func TestUnknownJobType(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -533,7 +543,9 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	retryAt := time.Now().Add(1 * time.Hour)
@@ -607,7 +619,9 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -677,7 +691,9 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobGroup(ctx, "other")
@@ -742,7 +758,9 @@ func TestWorkerShutdown(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -846,7 +864,9 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -896,7 +916,9 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -995,7 +1017,9 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -1089,7 +1113,9 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	jobRanChan := make(chan struct{}, 100)
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -1209,7 +1235,9 @@ func TestStress(t *testing.T) {
 	t2JobsRan := 0
 	t2JobRanChan := make(chan struct{})
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobGroup(ctx, "other")
@@ -1435,7 +1463,9 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	mustCleanDatabase(b, conn)
 	dbpool := mustNewDBPool(b)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(b, err)
 
 	runJobChan := make(chan struct{}, 100)
@@ -1494,7 +1524,9 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	mustCleanDatabase(b, conn)
 	dbpool := mustNewDBPool(b)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.GetConnFromPoolFunc(dbpool))
+	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+		GetConn: pgxjob.GetConnFromPoolFunc(dbpool),
+	})
 	require.NoError(b, err)
 
 	runJobChan := make(chan struct{}, 100)

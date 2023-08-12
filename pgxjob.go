@@ -32,10 +32,15 @@ type Scheduler struct {
 	jobTypesByID   map[int32]*JobType
 }
 
+type SchedulerConfig struct {
+	// GetConn is used to get a connection to the database. It must be set.
+	GetConn GetConnFunc
+}
+
 // NewScheduler returns a new Scheduler.
-func NewScheduler(ctx context.Context, getConnFunc GetConnFunc) (*Scheduler, error) {
+func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, error) {
 	s := &Scheduler{
-		getConnFunc:     getConnFunc,
+		getConnFunc:     config.GetConn,
 		jobGroupsByName: map[string]*JobGroup{},
 		jobGroupsByID:   map[int32]*JobGroup{},
 		jobTypesByName:  make(map[string]*JobType),
