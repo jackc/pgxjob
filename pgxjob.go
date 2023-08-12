@@ -23,7 +23,7 @@ const defaultGroupName = "default"
 
 // Scheduler is used to schedule jobs and start workers.
 type Scheduler struct {
-	getConnFunc GetConnFunc
+	acquireConn AcquireConnFunc
 
 	jobGroupsByName map[string]*JobGroup
 	jobGroupsByID   map[int32]*JobGroup
@@ -33,14 +33,14 @@ type Scheduler struct {
 }
 
 type SchedulerConfig struct {
-	// GetConn is used to get a connection to the database. It must be set.
-	GetConn GetConnFunc
+	// AcquireConn is used to get a connection to the database. It must be set.
+	AcquireConn AcquireConnFunc
 }
 
 // NewScheduler returns a new Scheduler.
 func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, error) {
 	s := &Scheduler{
-		getConnFunc:     config.GetConn,
+		acquireConn:     config.AcquireConn,
 		jobGroupsByName: map[string]*JobGroup{},
 		jobGroupsByID:   map[int32]*JobGroup{},
 		jobTypesByName:  make(map[string]*JobType),
@@ -85,7 +85,7 @@ func (s *Scheduler) RegisterJobGroup(ctx context.Context, name string) error {
 		return fmt.Errorf("pgxjob: group with name %s already registered", name)
 	}
 
-	conn, release, err := s.getConnFunc(ctx)
+	conn, release, err := s.acquireConn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -149,7 +149,7 @@ func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeP
 		return fmt.Errorf("job type with name %s already registered", params.Name)
 	}
 
-	conn, release, err := s.getConnFunc(ctx)
+	conn, release, err := s.acquireConn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -264,9 +264,12 @@ values ($1, $2, $3, (select id from pgxjob_workers where group_id = $1 order by 
 	return nil
 }
 
-type GetConnFunc func(ctx context.Context) (conn *pgxpool.Conn, release func(), err error)
+// AcquireConnFunc is a function that acquires a database connection for exclusive use. It returns a release function
+// that will be called when the connection is no longer needed.
+type AcquireConnFunc func(ctx context.Context) (conn *pgxpool.Conn, release func(), err error)
 
-func GetConnFromPoolFunc(pool *pgxpool.Pool) GetConnFunc {
+// AcquireConnFuncFromPool returns an AcquireConnFunc that acquires connections from the given *pgxpool.Pool.
+func AcquireConnFuncFromPool(pool *pgxpool.Pool) AcquireConnFunc {
 	return func(ctx context.Context) (conn *pgxpool.Conn, release func(), err error) {
 		conn, err = pool.Acquire(ctx)
 		if err != nil {
@@ -377,7 +380,7 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 	config.heartbeatDelayJitter = 30 * time.Second
 	config.workerDeadWithoutHeartbeatDuration = 5 * (config.minHeartbeatDelay + config.heartbeatDelayJitter)
 
-	conn, release, err := m.getConnFunc(ctx)
+	conn, release, err := m.acquireConn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pgxjob: failed to get connection: %w", err)
 	}
@@ -445,7 +448,7 @@ func (w *Worker) heartbeat() {
 					ctx, cancel := context.WithTimeout(w.cancelCtx, 15*time.Second)
 					defer cancel()
 
-					conn, release, err := w.scheduler.getConnFunc(ctx)
+					conn, release, err := w.scheduler.acquireConn(ctx)
 					if err != nil {
 						return fmt.Errorf("pgxjob: heartbeat for %d: failed to get connection: %w", w.ID, err)
 					}
@@ -618,7 +621,7 @@ from t`,
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer cancel()
 
-		conn, release, err := w.scheduler.getConnFunc(ctx)
+		conn, release, err := w.scheduler.acquireConn(ctx)
 		if err != nil {
 			w.handleWorkerError(fmt.Errorf("pgxjob: recording job results: failed to get connection: %w", err))
 			return
@@ -731,7 +734,7 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer cancel()
 
-		conn, release, err := w.scheduler.getConnFunc(ctx)
+		conn, release, err := w.scheduler.acquireConn(ctx)
 		if err != nil {
 			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to get connection for cleanup: %w", err)
 			return
@@ -880,7 +883,7 @@ where id in (select id from lock_jobs)
 returning id, type_id, params, inserted_at, run_at, coalesce(last_error, ''), error_count`
 
 func (w *Worker) fetchJobs() ([]*Job, error) {
-	conn, release, err := w.scheduler.getConnFunc(w.cancelCtx)
+	conn, release, err := w.scheduler.acquireConn(w.cancelCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
