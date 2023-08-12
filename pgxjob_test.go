@@ -170,18 +170,12 @@ func TestASAPEndToEnd(t *testing.T) {
 
 	require.Equal(t, []byte(nil), job.Params)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	select {
 	case <-jobRanChan:
@@ -190,9 +184,6 @@ func TestASAPEndToEnd(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	afterRunNow := time.Now()
 
@@ -262,19 +253,13 @@ func TestRunAtEndToEnd(t *testing.T) {
 
 	require.Equal(t, []byte(nil), job.Params)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		PollInterval: 50 * time.Millisecond,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	select {
 	case <-jobRanChan:
@@ -283,9 +268,6 @@ func TestRunAtEndToEnd(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	afterRunNow := time.Now()
 
@@ -341,19 +323,13 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	require.NoError(t, err)
 	totalJobs++
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		PollInterval: 50 * time.Millisecond,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	for i := 0; i < 10; i++ {
 		time.Sleep(10 * time.Millisecond)
@@ -375,9 +351,6 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	pendingASAPJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_asap_jobs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
@@ -423,18 +396,12 @@ func TestJobFailedNoRetry(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_asap_jobs`, nil, pgx.RowToStructByPos[asapJob])
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	select {
 	case <-jobRanChan:
@@ -443,9 +410,6 @@ func TestJobFailedNoRetry(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	afterRunNow := time.Now()
 
@@ -495,7 +459,7 @@ func TestUnknownJobType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -508,12 +472,6 @@ func TestUnknownJobType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
-
 	require.Eventually(t, func() bool {
 		n, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_asap_jobs`, nil, pgx.RowTo[int32])
 		require.NoError(t, err)
@@ -521,9 +479,6 @@ func TestUnknownJobType(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
@@ -561,18 +516,12 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	select {
 	case <-jobRanChan:
@@ -581,9 +530,6 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	afterRunNow := time.Now()
 
@@ -638,18 +584,12 @@ func TestWorkerRunsBacklog(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	for i := 0; i < backlogCount; i++ {
 		select {
@@ -660,9 +600,6 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	jobsStillPending, err := pgxutil.SelectRow(ctx, conn,
 		`select (select count(*) from pgxjob_asap_jobs) + (select count(*) from pgxjob_run_at_jobs)`,
@@ -710,7 +647,7 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{GroupName: "other"})
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		PollInterval: 500 * time.Millisecond,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
@@ -718,18 +655,9 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
-
 	time.Sleep(5 * time.Second)
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	// Our job did run.
 	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
@@ -783,7 +711,7 @@ func TestWorkerShutdown(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		MaxConcurrentJobs: 1,
 		MaxPrefetchedJobs: 1000,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
@@ -791,12 +719,6 @@ func TestWorkerShutdown(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	// Wait for at least 10 jobs to have started/run.
 	for i := 0; i < 10; i++ {
@@ -808,9 +730,6 @@ func TestWorkerShutdown(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	shutdownWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{worker.ID}, pgx.RowTo[bool])
 	require.NoError(t, err)
@@ -874,35 +793,27 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	workerConfig := pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
-	})
-	require.NoError(t, err)
+	}
+	workerConfig.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
+	workerConfig.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
 
-	worker.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
-	worker.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
+	worker, err := scheduler.StartWorker(ctx, workerConfig)
+	require.NoError(t, err)
 
 	firstHeartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
 	require.NoError(t, err)
 
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
-
-	require.Eventually(t, func() bool {
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		heartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
-		require.NoError(t, err)
-		return heartbeat.After(firstHeartbeat)
+		assert.NoError(c, err)
+		assert.True(c, heartbeat.After(firstHeartbeat))
 	}, 5*time.Second, 100*time.Millisecond)
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 }
 
 func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
@@ -957,22 +868,17 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	workerConfig := pgxjob.WorkerConfig{
 		PollInterval: 500 * time.Millisecond,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
-	})
+	}
+	workerConfig.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
+	workerConfig.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
+
+	worker, err := scheduler.StartWorker(ctx, workerConfig)
 	require.NoError(t, err)
-
-	worker.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
-	worker.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		deadWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{deadWorkerID}, pgx.RowTo[bool])
@@ -1001,9 +907,6 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 }
 
 func TestWorkerShouldLogJobRun(t *testing.T) {
@@ -1033,7 +936,7 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		PollInterval: 50 * time.Millisecond,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
@@ -1041,12 +944,6 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 		ShouldLogJobRun: pgxjob.LogFinalJobRuns,
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		jobsStillPending, err := pgxutil.SelectRow(ctx, conn,
@@ -1059,9 +956,6 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond)
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	jobRunsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
@@ -1126,7 +1020,7 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 
 	totalJobs := 0
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("worker error: %v", err)
 		},
@@ -1135,12 +1029,6 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-
-	startErrChan := make(chan error)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	listener := &pgxlisten.Listener{
 		Connect: func(ctx context.Context) (*pgx.Conn, error) {
@@ -1176,9 +1064,6 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 	}
 
 	worker.Shutdown(context.Background())
-
-	err = <-startErrChan
-	require.NoError(t, err)
 
 	pendingASAPJobsCount, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_asap_jobs`, nil, pgx.RowTo[int32])
 	require.NoError(t, err)
@@ -1267,20 +1152,14 @@ func TestStress(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	w1, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	w1, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("w1: worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
 
-	w1StartErrChan := make(chan error)
-	go func() {
-		err := w1.Start()
-		w1StartErrChan <- err
-	}()
-
-	w2, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	w2, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		MaxConcurrentJobs: 5,
 		MaxPrefetchedJobs: 10,
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
@@ -1289,25 +1168,13 @@ func TestStress(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	w2StartErrChan := make(chan error)
-	go func() {
-		err := w2.Start()
-		w2StartErrChan <- err
-	}()
-
-	w3, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	w3, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		GroupName: "other",
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			t.Errorf("w3: worker error: %v", err)
 		},
 	})
 	require.NoError(t, err)
-
-	w3StartErrChan := make(chan error)
-	go func() {
-		err := w3.Start()
-		w3StartErrChan <- err
-	}()
 
 	// Schedule a bunch of random jobs.
 	for i := 0; i < 100_000; i++ {
@@ -1343,17 +1210,11 @@ func TestStress(t *testing.T) {
 
 	err = w1.Shutdown(ctx)
 	require.NoError(t, err)
-	err = <-w1StartErrChan
-	require.NoError(t, err)
 
 	err = w2.Shutdown(ctx)
 	require.NoError(t, err)
-	err = <-w2StartErrChan
-	require.NoError(t, err)
 
 	err = w3.Shutdown(ctx)
-	require.NoError(t, err)
-	err = <-w3StartErrChan
 	require.NoError(t, err)
 
 	jobsStillPending, err := pgxutil.SelectRow(ctx, conn,
@@ -1476,7 +1337,7 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 		require.NoError(b, err)
 	}
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			b.Errorf("worker error: %v", err)
 		},
@@ -1486,26 +1347,15 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 
 	b.ResetTimer()
 
-	startErrChan := make(chan error, 1)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
-
 	for i := 0; i < b.N; i++ {
 		select {
 		case <-runJobChan:
-		case err := <-startErrChan:
-			b.Fatalf("startErrChan: %v", err)
 		case <-ctx.Done():
 			b.Fatalf("timed out waiting for jobs to finish: %d", i)
 		}
 	}
 
 	err = worker.Shutdown(context.Background())
-	require.NoError(b, err)
-
-	err = <-startErrChan
 	require.NoError(b, err)
 }
 
@@ -1532,19 +1382,13 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	})
 	require.NoError(b, err)
 
-	worker, err := scheduler.NewWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
 		HandleWorkerError: func(worker *pgxjob.Worker, err error) {
 			b.Errorf("worker error: %v", err)
 		},
 	})
 	require.NoError(b, err)
 	defer worker.Shutdown(context.Background())
-
-	startErrChan := make(chan error, 1)
-	go func() {
-		err := worker.Start()
-		startErrChan <- err
-	}()
 
 	listener := &pgxlisten.Listener{
 		Connect: func(ctx context.Context) (*pgx.Conn, error) {
@@ -1579,17 +1423,12 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		select {
 		case <-runJobChan:
-		case err := <-startErrChan:
-			b.Fatalf("startErrChan: %v", err)
 		case <-ctx.Done():
 			b.Fatalf("timed out waiting for jobs to finish: %d", i)
 		}
 	}
 
 	err = worker.Shutdown(context.Background())
-	require.NoError(b, err)
-
-	err = <-startErrChan
 	require.NoError(b, err)
 
 	listenerCtxCancel()

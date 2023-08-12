@@ -355,7 +355,6 @@ type Worker struct {
 
 	mux                     sync.Mutex
 	jobRunnerGoroutineCount int
-	started                 bool
 
 	runningJobsMux sync.Mutex
 	runningJobIDs  map[int64]struct{}
@@ -370,7 +369,8 @@ type Worker struct {
 	fetchAndStartJobsDoneChan chan struct{}
 }
 
-func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
+// StartWorker starts a worker.
+func (m *Scheduler) StartWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 	if config.GroupName == "" {
 		config.GroupName = defaultGroupName
 	}
@@ -400,9 +400,15 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 		config.MaxBufferedJobResultAge = 1 * time.Second
 	}
 
-	config.minHeartbeatDelay = 45 * time.Second
-	config.heartbeatDelayJitter = 30 * time.Second
-	config.workerDeadWithoutHeartbeatDuration = 5 * (config.minHeartbeatDelay + config.heartbeatDelayJitter)
+	if config.minHeartbeatDelay == 0 {
+		config.minHeartbeatDelay = 45 * time.Second
+	}
+	if config.heartbeatDelayJitter == 0 {
+		config.heartbeatDelayJitter = 30 * time.Second
+	}
+	if config.workerDeadWithoutHeartbeatDuration == 0 {
+		config.workerDeadWithoutHeartbeatDuration = 5 * (config.minHeartbeatDelay + config.heartbeatDelayJitter)
+	}
 
 	conn, release, err := m.acquireConn(ctx)
 	if err != nil {
@@ -427,30 +433,17 @@ func (m *Scheduler) NewWorker(ctx context.Context, config WorkerConfig) (*Worker
 		runningJobIDs:             make(map[int64]struct{}, config.MaxConcurrentJobs+config.MaxPrefetchedJobs),
 		jobChan:                   make(chan *Job),
 		jobResultsChan:            make(chan *jobResult),
+		writeJobResultsDoneChan:   make(chan struct{}),
 		heartbeatDoneChan:         make(chan struct{}),
 		fetchAndStartJobsDoneChan: make(chan struct{}),
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
 
-	return w, nil
-}
-
-// Start starts the worker. It runs until Shutdown is called. One worker cannot Start multiple times concurrently.
-func (w *Worker) Start() error {
-	w.mux.Lock()
-	if w.started {
-		w.mux.Unlock()
-		return fmt.Errorf("pgxjob: worker cannot be started more than once")
-	}
-	w.started = true
-	w.mux.Unlock()
-
 	go w.heartbeat()
-
-	w.writeJobResultsDoneChan = make(chan struct{})
 	go w.writeJobResults()
+	go w.fetchAndStartJobs()
 
-	return w.fetchAndStartJobs()
+	return w, nil
 }
 
 func (w *Worker) heartbeat() {

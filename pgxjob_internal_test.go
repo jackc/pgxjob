@@ -4,14 +4,14 @@ import (
 	"time"
 )
 
-func (w *Worker) SetMinHeartbeatDelayForTest(d time.Duration) {
-	w.minHeartbeatDelay = d
+func (c *WorkerConfig) SetMinHeartbeatDelayForTest(d time.Duration) {
+	c.minHeartbeatDelay = d
 }
 
-func (w *Worker) SetHeartbeatDelayJitterForTest(d time.Duration) {
-	w.heartbeatDelayJitter = d
+func (c *WorkerConfig) SetHeartbeatDelayJitterForTest(d time.Duration) {
+	c.heartbeatDelayJitter = d
 }
 
-func (w *Worker) SetWorkerDeadWithoutHeartbeatDurationForTest(d time.Duration) {
-	w.workerDeadWithoutHeartbeatDuration = d
+func (c *WorkerConfig) SetWorkerDeadWithoutHeartbeatDurationForTest(d time.Duration) {
+	c.workerDeadWithoutHeartbeatDuration = d
 }
