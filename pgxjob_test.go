@@ -693,10 +693,8 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
+		JobGroups:   []string{"other"},
 	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobGroup(ctx, "other")
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
@@ -1237,10 +1235,8 @@ func TestStress(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
+		JobGroups:   []string{"other"},
 	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobGroup(ctx, "other")
 	require.NoError(t, err)
 
 	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{

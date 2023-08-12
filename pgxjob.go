@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -35,6 +36,9 @@ type Scheduler struct {
 type SchedulerConfig struct {
 	// AcquireConn is used to get a connection to the database. It must be set.
 	AcquireConn AcquireConnFunc
+
+	// JobGroups is a lists of job groups that can be used by the scheduler. The job group "default" is always available.
+	JobGroups []string
 }
 
 // NewScheduler returns a new Scheduler.
@@ -47,9 +51,15 @@ func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, erro
 		jobTypesByID:    make(map[int32]*JobType),
 	}
 
-	err := s.RegisterJobGroup(ctx, defaultGroupName)
-	if err != nil {
-		return nil, err
+	if !slices.Contains(config.JobGroups, defaultGroupName) {
+		config.JobGroups = append(config.JobGroups, defaultGroupName)
+	}
+
+	for _, groupName := range config.JobGroups {
+		err := s.registerJobGroup(ctx, groupName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -75,8 +85,8 @@ type JobGroup struct {
 	Name string
 }
 
-// RegisterJobGroup registers a group. It must be called before any jobs are scheduled or workers are started.
-func (s *Scheduler) RegisterJobGroup(ctx context.Context, name string) error {
+// registerJobGroup registers a group. It must be called before any jobs are scheduled or workers are started.
+func (s *Scheduler) registerJobGroup(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("pgxjob: name must be set")
 	}
