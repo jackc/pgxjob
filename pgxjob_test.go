@@ -135,9 +135,9 @@ func TestASAPEndToEnd(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -173,7 +173,7 @@ func TestASAPEndToEnd(t *testing.T) {
 
 	require.Equal(t, []byte(nil), job.Params)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
 	select {
@@ -214,9 +214,9 @@ func TestRunAtEndToEnd(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -255,7 +255,7 @@ func TestRunAtEndToEnd(t *testing.T) {
 
 	require.Equal(t, []byte(nil), job.Params)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		PollInterval: 50 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -296,9 +296,9 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -325,7 +325,7 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	require.NoError(t, err)
 	totalJobs++
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		PollInterval: 50 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -375,9 +375,9 @@ func TestJobFailedNoRetry(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -398,7 +398,7 @@ func TestJobFailedNoRetry(t *testing.T) {
 	job, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_asap_jobs`, nil, pgx.RowToStructByPos[asapJob])
 	require.NoError(t, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
 	select {
@@ -444,9 +444,9 @@ func TestUnknownJobType(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -460,7 +460,7 @@ func TestUnknownJobType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
 	err = pgxutil.InsertRow(ctx, conn, "pgxjob_asap_jobs", map[string]any{
@@ -496,9 +496,9 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 
 	jobRanChan := make(chan struct{})
 	retryAt := time.Now().Add(1 * time.Hour)
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -516,7 +516,7 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
 	select {
@@ -560,9 +560,9 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -583,7 +583,7 @@ func TestWorkerRunsBacklog(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
 	for i := 0; i < backlogCount; i++ {
@@ -622,10 +622,10 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
 		JobGroups:   []string{"other"},
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -645,7 +645,7 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	err = scheduler.Schedule(ctx, conn, "test", nil, pgxjob.JobSchedule{GroupName: "other"})
 	require.NoError(t, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		PollInterval: 500 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -678,9 +678,9 @@ func TestWorkerShutdown(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -709,7 +709,7 @@ func TestWorkerShutdown(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		MaxConcurrentJobs: 1,
 		MaxPrefetchedJobs: 1000,
 	})
@@ -726,7 +726,13 @@ func TestWorkerShutdown(t *testing.T) {
 
 	worker.Shutdown(context.Background())
 
-	shutdownWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{worker.ID}, pgx.RowTo[bool])
+	select {
+	case <-worker.StartupComplete():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for job to run")
+	}
+
+	shutdownWorkerExists, err := pgxutil.SelectRow(ctx, conn, `select exists(select id from pgxjob_workers where id = $1)`, []any{worker.ID()}, pgx.RowTo[bool])
 	require.NoError(t, err)
 	require.Falsef(t, shutdownWorkerExists, "shutdown worker still exists")
 
@@ -775,9 +781,9 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -791,18 +797,24 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	workerConfig := pgxjob.WorkerConfig{}
+	workerConfig := &pgxjob.WorkerConfig{}
 	workerConfig.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
 	workerConfig.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
 
-	worker, err := scheduler.StartWorker(ctx, workerConfig)
+	worker, err := scheduler.StartWorker(workerConfig)
 	require.NoError(t, err)
 
-	firstHeartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
+	select {
+	case <-worker.StartupComplete():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for worker to start")
+	}
+
+	firstHeartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID()}, pgx.RowTo[time.Time])
 	require.NoError(t, err)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		heartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID}, pgx.RowTo[time.Time])
+		heartbeat, err := pgxutil.SelectRow(ctx, conn, `select heartbeat from pgxjob_workers where id = $1`, []any{worker.ID()}, pgx.RowTo[time.Time])
 		assert.NoError(c, err)
 		assert.True(c, heartbeat.After(firstHeartbeat))
 	}, 5*time.Second, 100*time.Millisecond)
@@ -818,9 +830,9 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -865,13 +877,13 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	workerConfig := pgxjob.WorkerConfig{
+	workerConfig := &pgxjob.WorkerConfig{
 		PollInterval: 500 * time.Millisecond,
 	}
 	workerConfig.SetMinHeartbeatDelayForTest(50 * time.Millisecond)
 	workerConfig.SetHeartbeatDelayJitterForTest(50 * time.Millisecond)
 
-	worker, err := scheduler.StartWorker(ctx, workerConfig)
+	worker, err := scheduler.StartWorker(workerConfig)
 	require.NoError(t, err)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -911,9 +923,9 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	mustCleanDatabase(t, conn)
 	dbpool := mustNewDBPool(t)
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -933,7 +945,7 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
 	require.NoError(t, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		PollInterval:    50 * time.Millisecond,
 		ShouldLogJobRun: pgxjob.LogFinalJobRuns,
 	})
@@ -958,6 +970,71 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 	jobRun, err := pgxutil.SelectRow(ctx, conn, `select * from pgxjob_job_runs`, nil, pgx.RowToStructByPos[jobRun])
 	require.NoError(t, err)
 	require.False(t, jobRun.LastError.Valid)
+}
+
+func TestStartupWhenDatabaseTemporarilyUnavailable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	dbAvailableAt := time.Now().Add(5 * time.Second)
+	acquireConn := func(ctx context.Context) (conn *pgxpool.Conn, release func(), err error) {
+		if time.Now().Before(dbAvailableAt) {
+			return nil, nil, fmt.Errorf("database temporarily unavailable")
+		}
+		return pgxjob.AcquireConnFuncFromPool(dbpool)(ctx)
+	}
+
+	jobDoneChan := make(chan struct{})
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
+		AcquireConn: acquireConn,
+		JobTypes: []*pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobDoneChan <- struct{}{}
+					return nil
+				},
+			},
+		},
+		HandleError: func(err error) {
+			t.Logf("scheduler HandleError: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
+		PollInterval: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	err = scheduler.ScheduleNow(ctx, conn, "test", nil)
+	require.NoError(t, err)
+
+	select {
+	case <-worker.StartupComplete():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for worker to start")
+	}
+
+	select {
+	case <-jobDoneChan:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for worker to start")
+	}
+
+	worker.Shutdown(context.Background())
+
+	jobsRun, err := pgxutil.SelectRow(ctx, conn, `select count(*) from pgxjob_job_runs`, nil, pgx.RowTo[int32])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, jobsRun)
 }
 
 // This test is actually a benchmark of how much writes the database actually performs. It is used to measure and
@@ -998,9 +1075,9 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	jobRanChan := make(chan struct{}, 100)
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -1017,7 +1094,7 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 
 	totalJobs := 0
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		ShouldLogJobRun: func(worker *pgxjob.Worker, job *pgxjob.Job, startTime, endTime time.Time, err error) bool {
 			return false
 		},
@@ -1111,10 +1188,10 @@ func TestStress(t *testing.T) {
 	t2JobsRan := 0
 	t2JobRanChan := make(chan struct{})
 
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
 		JobGroups:   []string{"other"},
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "t1",
 				RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
@@ -1149,16 +1226,16 @@ func TestStress(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	w1, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	w1, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(t, err)
 
-	w2, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	w2, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		MaxConcurrentJobs: 5,
 		MaxPrefetchedJobs: 10,
 	})
 	require.NoError(t, err)
 
-	w3, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{
+	w3, err := scheduler.StartWorker(&pgxjob.WorkerConfig{
 		GroupName: "other",
 	})
 	require.NoError(t, err)
@@ -1305,9 +1382,9 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	dbpool := mustNewDBPool(b)
 
 	runJobChan := make(chan struct{}, 100)
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -1327,7 +1404,7 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 		require.NoError(b, err)
 	}
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(b, err)
 	defer worker.Shutdown(context.Background())
 
@@ -1354,9 +1431,9 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	dbpool := mustNewDBPool(b)
 
 	runJobChan := make(chan struct{}, 100)
-	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-		JobTypes: []pgxjob.JobTypeConfig{
+		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "test",
 				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
@@ -1371,7 +1448,7 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	})
 	require.NoError(b, err)
 
-	worker, err := scheduler.StartWorker(ctx, pgxjob.WorkerConfig{})
+	worker, err := scheduler.StartWorker(&pgxjob.WorkerConfig{})
 	require.NoError(b, err)
 	defer worker.Shutdown(context.Background())
 

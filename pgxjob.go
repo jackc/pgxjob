@@ -34,6 +34,10 @@ type Scheduler struct {
 	jobTypesByID   map[int32]*JobType
 
 	handleError func(err error)
+
+	setupDoneChan chan struct{}
+
+	config *SchedulerConfig
 }
 
 type SchedulerConfig struct {
@@ -44,7 +48,7 @@ type SchedulerConfig struct {
 	JobGroups []string
 
 	// JobTypes is a list of job types that can be used by the scheduler. It must be set.
-	JobTypes []JobTypeConfig
+	JobTypes []*JobTypeConfig
 
 	// HandleError is a function that is called when an error occurs that cannot be handled or returned. For example, a
 	// network outage may cause a worker to be unable to fetch a job or record the outcome of an execution. The worker
@@ -54,35 +58,46 @@ type SchedulerConfig struct {
 }
 
 // NewScheduler returns a new Scheduler.
-func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, error) {
-	s := &Scheduler{
-		acquireConn:     config.AcquireConn,
-		jobGroupsByName: map[string]*JobGroup{},
-		jobGroupsByID:   map[int32]*JobGroup{},
-		jobTypesByName:  make(map[string]*JobType),
-		jobTypesByID:    make(map[int32]*JobType),
+func NewScheduler(config *SchedulerConfig) (*Scheduler, error) {
+	if len(config.JobTypes) == 0 {
+		return nil, fmt.Errorf("pgxjob: at least one job type must be registered")
 	}
 
 	if !slices.Contains(config.JobGroups, defaultGroupName) {
 		config.JobGroups = append(config.JobGroups, defaultGroupName)
 	}
 
-	for _, groupName := range config.JobGroups {
-		err := s.registerJobGroup(ctx, groupName)
-		if err != nil {
-			return nil, err
+	for _, jobGroupName := range config.JobGroups {
+		if jobGroupName == "" {
+			return nil, fmt.Errorf("pgxjob: job group name cannot be empty")
 		}
-	}
-
-	if len(config.JobTypes) == 0 {
-		return nil, fmt.Errorf("pgxjob: at least one job type must be registered")
 	}
 
 	for _, jobType := range config.JobTypes {
-		err := s.registerJobType(ctx, jobType)
-		if err != nil {
-			return nil, err
+		if jobType.Name == "" {
+			return nil, fmt.Errorf("pgxjob: job type name must be set")
 		}
+		if jobType.DefaultGroupName == "" {
+			jobType.DefaultGroupName = defaultGroupName
+		}
+
+		if !slices.Contains(config.JobGroups, jobType.DefaultGroupName) {
+			return nil, fmt.Errorf("pgxjob: job type has default group name %s that is not in job groups", jobType.DefaultGroupName)
+		}
+
+		if jobType.RunJob == nil {
+			return nil, fmt.Errorf("params.RunJob must be set")
+		}
+	}
+
+	s := &Scheduler{
+		acquireConn:     config.AcquireConn,
+		jobGroupsByName: map[string]*JobGroup{},
+		jobGroupsByID:   map[int32]*JobGroup{},
+		jobTypesByName:  make(map[string]*JobType),
+		jobTypesByID:    make(map[int32]*JobType),
+		setupDoneChan:   make(chan struct{}),
+		config:          config,
 	}
 
 	if config.HandleError == nil {
@@ -93,7 +108,47 @@ func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, erro
 		s.handleError = config.HandleError
 	}
 
+	go func() {
+		for {
+			err := s.setup()
+			if err == nil {
+				return
+			}
+			s.handleError(fmt.Errorf("pgxjob: scheduler setup failed: %w", err))
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	return s, nil
+}
+
+// setup makes one attempt to setup the scheduler.
+func (s *Scheduler) setup() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+
+	conn, release, err := s.acquireConn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer release()
+
+	for _, groupName := range s.config.JobGroups {
+		err := s.registerJobGroup(ctx, conn, groupName)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, jobType := range s.config.JobTypes {
+		err := s.registerJobType(ctx, conn, jobType)
+		if err != nil {
+			return err
+		}
+	}
+
+	close(s.setupDoneChan)
+	return nil
 }
 
 // JobType is a type of job.
@@ -117,33 +172,19 @@ type JobGroup struct {
 }
 
 // registerJobGroup registers a group. It must be called before any jobs are scheduled or workers are started.
-func (s *Scheduler) registerJobGroup(ctx context.Context, name string) error {
-	if name == "" {
-		return fmt.Errorf("pgxjob: name must be set")
-	}
-
-	if _, ok := s.jobGroupsByName[name]; ok {
-		return fmt.Errorf("pgxjob: group with name %s already registered", name)
-	}
-
-	conn, release, err := s.acquireConn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get connection: %w", err)
-	}
-	defer release()
-
+func (s *Scheduler) registerJobGroup(ctx context.Context, conn DB, name string) error {
 	var jobGroupID int32
 	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_groups where name = $1`, name).Scan(&jobGroupID)
 	if errors.Is(selectIDErr, pgx.ErrNoRows) {
 		_, insertErr := conn.Exec(ctx, `insert into pgxjob_groups (name) values ($1) on conflict do nothing`, name)
 		if insertErr != nil {
-			return fmt.Errorf("pgxjob: failed to insert group %s: %w", name, insertErr)
+			return fmt.Errorf("failed to insert group %s: %w", name, insertErr)
 		}
 
 		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_groups where name = $1`, name).Scan(&jobGroupID)
 	}
 	if selectIDErr != nil {
-		return fmt.Errorf("pgxjob: failed to select id for group %s: %w", name, selectIDErr)
+		return fmt.Errorf("failed to select id for group %s: %w", name, selectIDErr)
 	}
 
 	jq := &JobGroup{
@@ -167,54 +208,27 @@ type JobTypeConfig struct {
 	RunJob RunJobFunc
 }
 
-// registerJobType registers a job type. It must be called before any jobs are scheduled or workers are started.
-func (s *Scheduler) registerJobType(ctx context.Context, params JobTypeConfig) error {
-	if params.Name == "" {
-		return fmt.Errorf("params.Name must be set")
-	}
-
-	if params.DefaultGroupName == "" {
-		params.DefaultGroupName = defaultGroupName
-	}
-
-	defaultGroup, ok := s.jobGroupsByName[params.DefaultGroupName]
-	if !ok {
-		return fmt.Errorf("pgxjob: group with name %s not registered", params.DefaultGroupName)
-	}
-
-	if params.RunJob == nil {
-		return fmt.Errorf("params.RunJob must be set")
-	}
-
-	if _, ok := s.jobTypesByName[params.Name]; ok {
-		return fmt.Errorf("job type with name %s already registered", params.Name)
-	}
-
-	conn, release, err := s.acquireConn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get connection: %w", err)
-	}
-	defer release()
-
+// registerJobType registers a job type.
+func (s *Scheduler) registerJobType(ctx context.Context, conn DB, jobTypeConfig *JobTypeConfig) error {
 	var jobTypeID int32
-	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_types where name = $1`, params.Name).Scan(&jobTypeID)
+	selectIDErr := conn.QueryRow(ctx, `select id from pgxjob_types where name = $1`, jobTypeConfig.Name).Scan(&jobTypeID)
 	if errors.Is(selectIDErr, pgx.ErrNoRows) {
-		_, insertErr := conn.Exec(ctx, `insert into pgxjob_types (name) values ($1) on conflict do nothing`, params.Name)
+		_, insertErr := conn.Exec(ctx, `insert into pgxjob_types (name) values ($1) on conflict do nothing`, jobTypeConfig.Name)
 		if insertErr != nil {
-			return fmt.Errorf("pgxjob: failed to insert type %s: %w", params.Name, insertErr)
+			return fmt.Errorf("failed to insert job type %s: %w", jobTypeConfig.Name, insertErr)
 		}
 
-		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_types where name = $1`, params.Name).Scan(&jobTypeID)
+		selectIDErr = conn.QueryRow(ctx, `select id from pgxjob_types where name = $1`, jobTypeConfig.Name).Scan(&jobTypeID)
 	}
 	if selectIDErr != nil {
-		return fmt.Errorf("pgxjob: failed to select id for type %s: %w", params.Name, selectIDErr)
+		return fmt.Errorf("failed to select id for job type %s: %w", jobTypeConfig.Name, selectIDErr)
 	}
 
 	jt := &JobType{
 		ID:           jobTypeID,
-		Name:         params.Name,
-		DefaultGroup: defaultGroup,
-		RunJob:       params.RunJob,
+		Name:         jobTypeConfig.Name,
+		DefaultGroup: s.jobGroupsByName[jobTypeConfig.DefaultGroupName],
+		RunJob:       jobTypeConfig.RunJob,
 	}
 
 	s.jobTypesByName[jt.Name] = jt
@@ -264,6 +278,12 @@ func (m *Scheduler) ScheduleNow(ctx context.Context, db DB, jobTypeName string, 
 
 // Schedule schedules a job to be run according to schedule.
 func (m *Scheduler) Schedule(ctx context.Context, db DB, jobTypeName string, jobParams any, schedule JobSchedule) error {
+	select {
+	case <-m.setupDoneChan:
+	case <-ctx.Done():
+		return fmt.Errorf("pgxjob: schedule %w", ctx.Err())
+	}
+
 	jobType, ok := m.jobTypesByName[jobTypeName]
 	if !ok {
 		return fmt.Errorf("pgxjob: job type with name %s not registered", jobTypeName)
@@ -353,16 +373,18 @@ type WorkerConfig struct {
 }
 
 type Worker struct {
-	ID int32
+	id int32
 
-	WorkerConfig
-	group *JobGroup
+	config *WorkerConfig
+	group  *JobGroup
 
 	scheduler  *Scheduler
 	signalChan chan struct{}
 
 	cancelCtx context.Context
 	cancel    context.CancelFunc
+
+	startupCompleteChan chan struct{}
 
 	mux                     sync.Mutex
 	jobRunnerGoroutineCount int
@@ -380,16 +402,16 @@ type Worker struct {
 	fetchAndStartJobsDoneChan chan struct{}
 }
 
-// StartWorker starts a worker.
-func (m *Scheduler) StartWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
+// StartWorker starts a worker. The *Worker is returned immediately, but the startup process is run in the background.
+// This is to avoid blocking or returning an error if the database is temporarily unavailable. Use StartupComplete if
+// it is necessary to wait for the worker to be ready.
+func (m *Scheduler) StartWorker(config *WorkerConfig) (*Worker, error) {
 	if config.GroupName == "" {
 		config.GroupName = defaultGroupName
 	}
-	jg, ok := m.jobGroupsByName[config.GroupName]
-	if !ok {
+	if !slices.Contains(m.config.JobGroups, config.GroupName) {
 		return nil, fmt.Errorf("pgxjob: group with name %s not registered", config.GroupName)
 	}
-	group := jg
 
 	if config.MaxConcurrentJobs == 0 {
 		config.MaxConcurrentJobs = 10
@@ -421,26 +443,11 @@ func (m *Scheduler) StartWorker(ctx context.Context, config WorkerConfig) (*Work
 		config.workerDeadWithoutHeartbeatDuration = 5 * (config.minHeartbeatDelay + config.heartbeatDelayJitter)
 	}
 
-	conn, release, err := m.acquireConn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("pgxjob: failed to get connection: %w", err)
-	}
-	defer release()
-	workerID, err := pgxutil.SelectRow(ctx, conn,
-		`insert into pgxjob_workers (heartbeat, group_id) values (now(), $1) returning id`,
-		[]any{group.ID},
-		pgx.RowTo[int32],
-	)
-	if err != nil {
-		return nil, fmt.Errorf("pgxjob: failed to insert into pgxjob_workers: %w", err)
-	}
-
 	w := &Worker{
-		ID:                        workerID,
-		WorkerConfig:              config,
-		group:                     group,
+		config:                    config,
 		scheduler:                 m,
 		signalChan:                make(chan struct{}, 1),
+		startupCompleteChan:       make(chan struct{}),
 		runningJobIDs:             make(map[int64]struct{}, config.MaxConcurrentJobs+config.MaxPrefetchedJobs),
 		jobChan:                   make(chan *Job),
 		jobResultsChan:            make(chan *jobResult),
@@ -450,11 +457,63 @@ func (m *Scheduler) StartWorker(ctx context.Context, config WorkerConfig) (*Work
 	}
 	w.cancelCtx, w.cancel = context.WithCancel(context.Background())
 
-	go w.heartbeat()
-	go w.writeJobResults()
-	go w.fetchAndStartJobs()
+	go func() {
+		for {
+			select {
+			case <-w.cancelCtx.Done():
+				return
+			default:
+			}
+
+			err := w.start()
+			if err == nil {
+				go w.heartbeat()
+				go w.writeJobResults()
+				go w.fetchAndStartJobs()
+				return
+			}
+			w.scheduler.handleError(fmt.Errorf("pgxjob: failed to setup worker: %w", err))
+
+			select {
+			case <-w.cancelCtx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}()
 
 	return w, nil
+}
+
+func (w *Worker) start() error {
+	ctx, cancel := context.WithTimeout(w.cancelCtx, 30*time.Second)
+	defer cancel()
+
+	select {
+	case <-w.scheduler.setupDoneChan:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	w.group = w.scheduler.jobGroupsByName[w.config.GroupName]
+
+	conn, release, err := w.scheduler.acquireConn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer release()
+
+	w.id, err = pgxutil.SelectRow(ctx, conn,
+		`insert into pgxjob_workers (heartbeat, group_id) values (now(), $1) returning id`,
+		[]any{w.group.ID},
+		pgx.RowTo[int32],
+	)
+	if err != nil {
+		return fmt.Errorf("failed to insert into pgxjob_workers: %w", err)
+	}
+
+	close(w.startupCompleteChan)
+	return nil
 }
 
 func (w *Worker) heartbeat() {
@@ -464,11 +523,11 @@ func (w *Worker) heartbeat() {
 		select {
 		case <-w.cancelCtx.Done():
 			return
-		case <-time.After(w.minHeartbeatDelay + time.Duration(rand.Int63n(int64(w.heartbeatDelayJitter)))):
+		case <-time.After(w.config.minHeartbeatDelay + time.Duration(rand.Int63n(int64(w.config.heartbeatDelayJitter)))):
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						w.handleWorkerError(fmt.Errorf("pgxjob: panic in heartbeat for %d: %v\n%s", w.ID, r, debug.Stack()))
+						w.handleWorkerError(fmt.Errorf("pgxjob: panic in heartbeat for %d: %v\n%s", w.id, r, debug.Stack()))
 					}
 				}()
 
@@ -478,18 +537,18 @@ func (w *Worker) heartbeat() {
 
 					conn, release, err := w.scheduler.acquireConn(ctx)
 					if err != nil {
-						return fmt.Errorf("pgxjob: heartbeat for %d: failed to get connection: %w", w.ID, err)
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to get connection: %w", w.id, err)
 					}
 					defer release()
 
-					_, err = conn.Exec(ctx, `update pgxjob_workers set heartbeat = now() where id = $1`, w.ID)
+					_, err = conn.Exec(ctx, `update pgxjob_workers set heartbeat = now() where id = $1`, w.id)
 					if err != nil {
-						return fmt.Errorf("pgxjob: heartbeat for %d: failed to update: %w", w.ID, err)
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to update: %w", w.id, err)
 					}
 
-					_, err = conn.Exec(ctx, `delete from pgxjob_workers where heartbeat + $1 < now()`, w.workerDeadWithoutHeartbeatDuration)
+					_, err = conn.Exec(ctx, `delete from pgxjob_workers where heartbeat + $1 < now()`, w.config.workerDeadWithoutHeartbeatDuration)
 					if err != nil {
-						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.ID, err)
+						return fmt.Errorf("pgxjob: heartbeat for %d: failed to cleanup dead workers: %w", w.id, err)
 					}
 
 					return nil
@@ -525,10 +584,10 @@ func (w *Worker) writeJobResults() {
 		ASAP      bool
 	}
 
-	jobResults := make([]*jobResult, 0, w.MaxBufferedJobResults)
-	asapJobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
-	runAtJobIDsToDelete := make([]int64, 0, w.MaxBufferedJobResults)
-	pgxjobJobRunsToInsert := make([]pgxjobJobRun, 0, w.MaxBufferedJobResults)
+	jobResults := make([]*jobResult, 0, w.config.MaxBufferedJobResults)
+	asapJobIDsToDelete := make([]int64, 0, w.config.MaxBufferedJobResults)
+	runAtJobIDsToDelete := make([]int64, 0, w.config.MaxBufferedJobResults)
+	pgxjobJobRunsToInsert := make([]pgxjobJobRun, 0, w.config.MaxBufferedJobResults)
 
 	flushTimer := time.NewTimer(time.Hour)
 	flushTimer.Stop()
@@ -588,7 +647,7 @@ func (w *Worker) writeJobResults() {
 					}
 				}
 			}
-			if w.ShouldLogJobRun == nil || w.ShouldLogJobRun(w, job, jobResult.startTime, jobResult.finishedAt, jobResult.err) {
+			if w.config.ShouldLogJobRun == nil || w.config.ShouldLogJobRun(w, job, jobResult.startTime, jobResult.finishedAt, jobResult.err) {
 				pgxjobJobRunsToInsert = append(pgxjobJobRunsToInsert, pgxjobJobRun{
 					JobID:      job.ID,
 					InsertedAt: job.InsertedAt,
@@ -687,10 +746,10 @@ from t`,
 
 	appendJobResult := func(jobResult *jobResult) {
 		jobResults = append(jobResults, jobResult)
-		if len(jobResults) >= w.MaxBufferedJobResults {
+		if len(jobResults) >= w.config.MaxBufferedJobResults {
 			flush()
 		} else if len(jobResults) == 1 {
-			flushTimer.Reset(w.MaxBufferedJobResultAge)
+			flushTimer.Reset(w.config.MaxBufferedJobResultAge)
 		}
 	}
 
@@ -728,6 +787,17 @@ loop2:
 			flush()
 		}
 	}
+}
+
+// StartupComplete returns a channel that is closed when the worker start is complete.
+func (w *Worker) StartupComplete() <-chan struct{} {
+	return w.startupCompleteChan
+}
+
+// ID gets the worker's ID. This is only valid after the worker startup has completed. This is guaranteed while processing
+// a job, but not immediately after StartWorker has returned. Use StartupComplete to wait for the worker to start.
+func (w *Worker) ID() int32 {
+	return w.id
 }
 
 // Shutdown stops the worker. It waits for all jobs to finish before returning. Cancel ctx to force shutdown without
@@ -769,7 +839,7 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 		}
 		defer release()
 
-		_, err = conn.Exec(ctx, `delete from pgxjob_workers where id = $1`, w.ID)
+		_, err = conn.Exec(ctx, `delete from pgxjob_workers where id = $1`, w.id)
 		if err != nil {
 			cleanupErrChan <- fmt.Errorf("pgxjob: shutdown failed to cleanup worker: %w", err)
 			return
@@ -824,7 +894,7 @@ func (w *Worker) fetchAndStartJobs() error {
 			}
 			w.handleWorkerError(fmt.Errorf("pgxjob: failed to fetch jobs: %w", err))
 		}
-		noJobsAvailableInDatabase := len(jobs) < w.MaxPrefetchedJobs
+		noJobsAvailableInDatabase := len(jobs) < w.config.MaxPrefetchedJobs
 		w.runningJobsMux.Lock()
 		for _, job := range jobs {
 			w.runningJobIDs[job.ID] = struct{}{}
@@ -838,7 +908,7 @@ func (w *Worker) fetchAndStartJobs() error {
 				return nil
 			default:
 				w.mux.Lock()
-				if w.jobRunnerGoroutineCount < w.MaxConcurrentJobs {
+				if w.jobRunnerGoroutineCount < w.config.MaxConcurrentJobs {
 					w.startJobRunner()
 				}
 				w.mux.Unlock()
@@ -854,7 +924,7 @@ func (w *Worker) fetchAndStartJobs() error {
 			select {
 			case <-w.cancelCtx.Done():
 				return nil
-			case <-time.NewTimer(w.PollInterval).C:
+			case <-time.NewTimer(w.config.PollInterval).C:
 			case <-w.signalChan:
 			}
 		}
@@ -959,17 +1029,17 @@ func (w *Worker) fetchJobs() ([]*Job, error) {
 
 	jobs, err := pgxutil.Select(w.cancelCtx, conn,
 		fetchPrelockedASAPJobsSQL,
-		[]any{w.group.ID, w.ID, runningJobIDs, w.MaxPrefetchedJobs},
+		[]any{w.group.ID, w.id, runningJobIDs, w.config.MaxPrefetchedJobs},
 		rowToASAPJob,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch prelocked pgxjob_asap_jobs: %w", err)
 	}
 
-	if len(jobs) < w.MaxPrefetchedJobs {
+	if len(jobs) < w.config.MaxPrefetchedJobs {
 		asapJobs, err := pgxutil.Select(w.cancelCtx, conn,
 			fetchAndLockASAPJobsSQL,
-			[]any{w.group.ID, w.MaxPrefetchedJobs, w.ID},
+			[]any{w.group.ID, w.config.MaxPrefetchedJobs, w.id},
 			rowToASAPJob,
 		)
 		if err != nil {
@@ -982,10 +1052,10 @@ func (w *Worker) fetchJobs() ([]*Job, error) {
 		jobs = append(jobs, asapJobs...)
 	}
 
-	if len(jobs) < w.MaxPrefetchedJobs {
+	if len(jobs) < w.config.MaxPrefetchedJobs {
 		runAtJobs, err := pgxutil.Select(w.cancelCtx, conn,
 			fetchAndLockRunAtJobsSQL,
-			[]any{w.group.ID, w.MaxPrefetchedJobs - len(jobs), w.ID},
+			[]any{w.group.ID, w.config.MaxPrefetchedJobs - len(jobs), w.id},
 			func(row pgx.CollectableRow) (*Job, error) {
 				var job Job
 				var jobTypeID int32
@@ -1057,7 +1127,7 @@ func (w *Worker) startJobRunner() {
 }
 
 func (w *Worker) handleWorkerError(err error) {
-	w.scheduler.handleError(fmt.Errorf("worker %v: %w", w.ID, err))
+	w.scheduler.handleError(fmt.Errorf("worker %v: %w", w.id, err))
 }
 
 // Signal causes the worker to wake up and process requests. It is safe to call this from multiple goroutines. It does
