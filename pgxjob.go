@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime/debug"
 	"slices"
 	"sync"
@@ -31,6 +32,8 @@ type Scheduler struct {
 
 	jobTypesByName map[string]*JobType
 	jobTypesByID   map[int32]*JobType
+
+	handleError func(err error)
 }
 
 type SchedulerConfig struct {
@@ -42,6 +45,12 @@ type SchedulerConfig struct {
 
 	// JobTypes is a list of job types that can be used by the scheduler. It must be set.
 	JobTypes []JobTypeConfig
+
+	// HandleError is a function that is called when an error occurs that cannot be handled or returned. For example, a
+	// network outage may cause a worker to be unable to fetch a job or record the outcome of an execution. The worker
+	// should not be stopped because of this. Instead, it should try again later when the network may have been restored.
+	// These types of errors are passed to HandleError. If not set errors are logged to stderr.
+	HandleError func(err error)
 }
 
 // NewScheduler returns a new Scheduler.
@@ -74,6 +83,14 @@ func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, erro
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if config.HandleError == nil {
+		s.handleError = func(err error) {
+			fmt.Fprintf(os.Stderr, "pgxjob: HandleError: %v\n", err)
+		}
+	} else {
+		s.handleError = config.HandleError
 	}
 
 	return s, nil
@@ -325,12 +342,6 @@ type WorkerConfig struct {
 	// MaxBufferedJobResultAge is the maximum age of a buffered job result before the job results must be flushed to the
 	// database. If not set 1 second is used.
 	MaxBufferedJobResultAge time.Duration
-
-	// HandleWorkerError is a function that is called when the worker encounters an error there is nothing that can be
-	// done within the worker. For example, a network outage may cause the worker to be unable to fetch a job or record
-	// the outcome of an execution. The Worker.Run execution should not be stopped because of this. Instead, it should try
-	// again later when the network may have been restored. These types of errors are passed to HandleWorkerError.
-	HandleWorkerError func(worker *Worker, err error)
 
 	// ShouldLogJobRun is called for every job run. If it returns true then the run is logged to the pgxjob_job_runs
 	// table. If it returns false it is not. If not set all job runs are logged.
@@ -1046,9 +1057,7 @@ func (w *Worker) startJobRunner() {
 }
 
 func (w *Worker) handleWorkerError(err error) {
-	if w.HandleWorkerError != nil {
-		w.HandleWorkerError(w, err)
-	}
+	w.scheduler.handleError(fmt.Errorf("worker %v: %w", w.ID, err))
 }
 
 // Signal causes the worker to wake up and process requests. It is safe to call this from multiple goroutines. It does
