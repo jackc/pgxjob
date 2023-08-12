@@ -137,14 +137,14 @@ func TestASAPEndToEnd(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -226,14 +226,14 @@ func TestRunAtEndToEnd(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -317,14 +317,14 @@ func TestConcurrentJobSchedulingAndWorking(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -405,14 +405,14 @@ func TestJobFailedNoRetry(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return fmt.Errorf("test error")
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return fmt.Errorf("test error")
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -484,13 +484,13 @@ func TestUnknownJobType(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -543,18 +543,17 @@ func TestJobFailedErrorWithRetry(t *testing.T) {
 	dbpool := mustNewDBPool(t)
 
 	jobRanChan := make(chan struct{})
+	retryAt := time.Now().Add(1 * time.Hour)
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	retryAt := time.Now().Add(1 * time.Hour)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("test error"), RetryAt: retryAt}
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("test error"), RetryAt: retryAt}
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -621,14 +620,14 @@ func TestWorkerRunsBacklog(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -694,13 +693,13 @@ func TestWorkerIgnoresOtherJobGroups(t *testing.T) {
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
 		JobGroups:   []string{"other"},
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -758,17 +757,17 @@ func TestWorkerShutdown(t *testing.T) {
 	jobRanChan := make(chan struct{})
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			select {
-			case jobRanChan <- struct{}{}:
-			case <-time.After(10 * time.Millisecond):
-			}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					select {
+					case jobRanChan <- struct{}{}:
+					case <-time.After(10 * time.Millisecond):
+					}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -864,13 +863,13 @@ func TestWorkerHeartbeatBeats(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -916,13 +915,13 @@ func TestWorkerHeartbeatCleansUpDeadWorkers(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -1017,16 +1016,16 @@ func TestWorkerShouldLogJobRun(t *testing.T) {
 
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			if job.ErrorCount == 0 {
-				return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("failed first time"), RetryAt: time.Now().Add(100 * time.Millisecond)}
-			}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					if job.ErrorCount == 0 {
+						return &pgxjob.ErrorWithRetry{Err: fmt.Errorf("failed first time"), RetryAt: time.Now().Add(100 * time.Millisecond)}
+					}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -1113,14 +1112,14 @@ func TestBenchmarkDatabaseWrites(t *testing.T) {
 	jobRanChan := make(chan struct{}, 100)
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			jobRanChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					jobRanChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -1236,37 +1235,35 @@ func TestStress(t *testing.T) {
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
 		JobGroups:   []string{"other"},
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "t1",
-		RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
-			if rand.Intn(100) == 0 {
-				return errors.New("random error")
-			}
-			select {
-			case t1JobRanChan <- struct{}{}:
-			case <-time.NewTimer(100 * time.Millisecond).C:
-				return errors.New("t1JobRanChan full")
-			}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "t1",
+				RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+					if rand.Intn(100) == 0 {
+						return errors.New("random error")
+					}
+					select {
+					case t1JobRanChan <- struct{}{}:
+					case <-time.NewTimer(100 * time.Millisecond).C:
+						return errors.New("t1JobRanChan full")
+					}
+					return nil
+				},
+					1000, 10*time.Millisecond),
+			},
+			{
+				Name: "t2",
+				RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+					select {
+					case t2JobRanChan <- struct{}{}:
+					case <-time.NewTimer(100 * time.Millisecond).C:
+						return errors.New("t2JobRanChan full")
+					}
+					return nil
+				},
+					1000, 10*time.Millisecond),
+			},
 		},
-			1000, 10*time.Millisecond),
-	})
-	require.NoError(t, err)
-
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "t2",
-		RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
-			select {
-			case t2JobRanChan <- struct{}{}:
-			case <-time.NewTimer(100 * time.Millisecond).C:
-				return errors.New("t2JobRanChan full")
-			}
-			return nil
-		},
-			1000, 10*time.Millisecond),
 	})
 	require.NoError(t, err)
 
@@ -1459,17 +1456,17 @@ func BenchmarkRunBackloggedJobs(b *testing.B) {
 	mustCleanDatabase(b, conn)
 	dbpool := mustNewDBPool(b)
 
+	runJobChan := make(chan struct{}, 100)
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(b, err)
-
-	runJobChan := make(chan struct{}, 100)
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			runJobChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					runJobChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(b, err)
@@ -1520,17 +1517,17 @@ func BenchmarkRunConcurrentlyInsertedJobs(b *testing.B) {
 	mustCleanDatabase(b, conn)
 	dbpool := mustNewDBPool(b)
 
+	runJobChan := make(chan struct{}, 100)
 	scheduler, err := pgxjob.NewScheduler(ctx, pgxjob.SchedulerConfig{
 		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
-	})
-	require.NoError(b, err)
-
-	runJobChan := make(chan struct{}, 100)
-	err = scheduler.RegisterJobType(ctx, pgxjob.RegisterJobTypeParams{
-		Name: "test",
-		RunJob: func(ctx context.Context, job *pgxjob.Job) error {
-			runJobChan <- struct{}{}
-			return nil
+		JobTypes: []pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					runJobChan <- struct{}{}
+					return nil
+				},
+			},
 		},
 	})
 	require.NoError(b, err)

@@ -39,6 +39,9 @@ type SchedulerConfig struct {
 
 	// JobGroups is a lists of job groups that can be used by the scheduler. The job group "default" is always available.
 	JobGroups []string
+
+	// JobTypes is a list of job types that can be used by the scheduler. It must be set.
+	JobTypes []JobTypeConfig
 }
 
 // NewScheduler returns a new Scheduler.
@@ -57,6 +60,17 @@ func NewScheduler(ctx context.Context, config SchedulerConfig) (*Scheduler, erro
 
 	for _, groupName := range config.JobGroups {
 		err := s.registerJobGroup(ctx, groupName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(config.JobTypes) == 0 {
+		return nil, fmt.Errorf("pgxjob: at least one job type must be registered")
+	}
+
+	for _, jobType := range config.JobTypes {
+		err := s.registerJobType(ctx, jobType)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +138,7 @@ func (s *Scheduler) registerJobGroup(ctx context.Context, name string) error {
 	return nil
 }
 
-type RegisterJobTypeParams struct {
+type JobTypeConfig struct {
 	// Name is the name of the job type. It must be set and unique.
 	Name string
 
@@ -136,8 +150,8 @@ type RegisterJobTypeParams struct {
 	RunJob RunJobFunc
 }
 
-// RegisterJobType registers a job type. It must be called before any jobs are scheduled or workers are started.
-func (s *Scheduler) RegisterJobType(ctx context.Context, params RegisterJobTypeParams) error {
+// registerJobType registers a job type. It must be called before any jobs are scheduled or workers are started.
+func (s *Scheduler) registerJobType(ctx context.Context, params JobTypeConfig) error {
 	if params.Name == "" {
 		return fmt.Errorf("params.Name must be set")
 	}
