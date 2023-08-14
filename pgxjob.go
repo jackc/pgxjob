@@ -677,7 +677,7 @@ from t`,
 				)
 			} else {
 				batch.Queue(
-					`update pgxjob_run_at_jobs set error_count = error_count + 1, last_error = $1, next_run_at = $2 where id = $3`,
+					`update pgxjob_run_at_jobs set error_count = error_count + 1, last_error = $1, next_run_at = $2, worker_id = null where id = $3`,
 					jobUpdate.LastError, jobUpdate.NextRunAt, jobUpdate.ID,
 				)
 			}
