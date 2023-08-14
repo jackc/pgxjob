@@ -240,7 +240,7 @@ func (s *Scheduler) registerJobType(ctx context.Context, conn DB, jobTypeConfig 
 type RunJobFunc func(ctx context.Context, job *Job) error
 
 // UnmarshalParams returns a JobType.RunJob function that unmarshals job.Params into a T and calls fn.
-func UnmarshalParams[T any](fn func(ctx context.Context, job *Job, params *T) error) RunJobFunc {
+func UnmarshalParams[T any](fn func(ctx context.Context, job *Job, params T) error) RunJobFunc {
 	return func(ctx context.Context, job *Job) error {
 		var params T
 		err := json.Unmarshal(job.Params, &params)
@@ -248,7 +248,7 @@ func UnmarshalParams[T any](fn func(ctx context.Context, job *Job, params *T) er
 			return fmt.Errorf("unmarshal job params failed: %w", err)
 		}
 
-		return fn(ctx, job, &params)
+		return fn(ctx, job, params)
 	}
 }
 
