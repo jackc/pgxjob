@@ -1194,7 +1194,7 @@ func TestStress(t *testing.T) {
 		JobTypes: []*pgxjob.JobTypeConfig{
 			{
 				Name: "t1",
-				RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+				RunJob: pgxjob.FilterError(func(ctx context.Context, job *pgxjob.Job) error {
 					if rand.Intn(100) == 0 {
 						return errors.New("random error")
 					}
@@ -1205,11 +1205,11 @@ func TestStress(t *testing.T) {
 					}
 					return nil
 				},
-					1000, 10*time.Millisecond),
+					&pgxjob.RetryLinearBackoffErrorFilter{MaxRetries: 1000, BaseDelay: 10 * time.Millisecond}),
 			},
 			{
 				Name: "t2",
-				RunJob: pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
+				RunJob: pgxjob.FilterError(func(ctx context.Context, job *pgxjob.Job) error {
 					select {
 					case t2JobRanChan <- struct{}{}:
 					case <-time.NewTimer(100 * time.Millisecond).C:
@@ -1217,7 +1217,7 @@ func TestStress(t *testing.T) {
 					}
 					return nil
 				},
-					1000, 10*time.Millisecond),
+					&pgxjob.RetryLinearBackoffErrorFilter{MaxRetries: 1000, BaseDelay: 10 * time.Millisecond}),
 			},
 		},
 		HandleError: func(err error) {
@@ -1321,9 +1321,9 @@ func TestFilterError(t *testing.T) {
 	var originalError error
 	fn := pgxjob.FilterError(func(ctx context.Context, job *pgxjob.Job) error {
 		return originalError
-	}, func(job *pgxjob.Job, jobErr error) error {
+	}, pgxjob.FilterErrorFunc(func(job *pgxjob.Job, jobErr error) error {
 		return fmt.Errorf("filtered error")
-	})
+	}))
 
 	err := fn(context.Background(), nil)
 	require.NoError(t, err)
@@ -1333,11 +1333,8 @@ func TestFilterError(t *testing.T) {
 	require.EqualError(t, err, "filtered error")
 }
 
-func TestRetryLinearBackoff(t *testing.T) {
-	var originalError error
-	fn := pgxjob.RetryLinearBackoff(func(ctx context.Context, job *pgxjob.Job) error {
-		return originalError
-	}, 3, 1*time.Hour)
+func TestRetryLinearBackoffErrorFilter(t *testing.T) {
+	errorFilter := pgxjob.RetryLinearBackoffErrorFilter{MaxRetries: 3, BaseDelay: 1 * time.Hour}
 
 	for i, tt := range []struct {
 		originalError error
@@ -1351,12 +1348,11 @@ func TestRetryLinearBackoff(t *testing.T) {
 		{fmt.Errorf("original error"), 3, 0},
 	} {
 		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			originalError = tt.originalError
 			job := &pgxjob.Job{ErrorCount: tt.errorCount}
 			earliestRetryTime := time.Now().Add(tt.retryDelay)
-			err := fn(context.Background(), job)
+			err := errorFilter.FilterError(job, tt.originalError)
 			latestRetryTime := time.Now().Add(tt.retryDelay)
-			if originalError == nil {
+			if tt.originalError == nil {
 				require.NoError(t, err)
 			} else {
 				var errorWithRetry *pgxjob.ErrorWithRetry
