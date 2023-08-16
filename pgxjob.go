@@ -23,6 +23,12 @@ import (
 const PGNotifyChannel = "pgxjob_job_available"
 const defaultGroupName = "default"
 
+// DefaultContextScheduler is the default scheduler. It is returned by Ctx when no scheduler is set in the context. It
+// must be set before use.
+var DefaultContextScheduler *Scheduler
+
+type ctxKey struct{}
+
 // Scheduler is used to schedule jobs and start workers.
 type Scheduler struct {
 	acquireConn AcquireConnFunc
@@ -323,6 +329,21 @@ values ($1, $2, $3, (select id from pgxjob_workers where group_id = $1 order by 
 	}
 
 	return nil
+}
+
+// Ctx returns the *Scheduler attached to ctx. If ctx does not have a *Scheduler attached then it returns
+// DefaultContextScheduler.
+func Ctx(ctx context.Context) *Scheduler {
+	if s, ok := ctx.Value(ctxKey{}).(*Scheduler); ok {
+		return s
+	} else {
+		return DefaultContextScheduler
+	}
+}
+
+// WithContext returns a copy of ctx with s attached.
+func (s *Scheduler) WithContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKey{}, s)
 }
 
 // AcquireConnFunc is a function that acquires a database connection for exclusive use. It returns a release function

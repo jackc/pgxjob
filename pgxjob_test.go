@@ -1369,6 +1369,54 @@ func TestRetryLinearBackoffErrorFilter(t *testing.T) {
 	}
 }
 
+func TestSchedulerContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := mustConnect(t)
+	mustCleanDatabase(t, conn)
+	dbpool := mustNewDBPool(t)
+
+	scheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
+		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
+		JobTypes: []*pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
+		},
+		HandleError: func(err error) {
+			t.Errorf("scheduler HandleError: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	require.Nil(t, pgxjob.Ctx(ctx))
+	pgxjob.DefaultContextScheduler = scheduler
+	require.Equal(t, scheduler, pgxjob.Ctx(ctx))
+
+	otherScheduler, err := pgxjob.NewScheduler(&pgxjob.SchedulerConfig{
+		AcquireConn: pgxjob.AcquireConnFuncFromPool(dbpool),
+		JobTypes: []*pgxjob.JobTypeConfig{
+			{
+				Name: "test",
+				RunJob: func(ctx context.Context, job *pgxjob.Job) error {
+					return nil
+				},
+			},
+		},
+		HandleError: func(err error) {
+			t.Errorf("scheduler HandleError: %v", err)
+		},
+	})
+	require.NoError(t, err)
+
+	otherCtx := otherScheduler.WithContext(ctx)
+	require.Equal(t, otherScheduler, pgxjob.Ctx(otherCtx))
+}
+
 func BenchmarkRunBackloggedJobs(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
