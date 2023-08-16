@@ -15,3 +15,7 @@ func (c *WorkerConfig) SetHeartbeatDelayJitterForTest(d time.Duration) {
 func (c *WorkerConfig) SetWorkerDeadWithoutHeartbeatDurationForTest(d time.Duration) {
 	c.workerDeadWithoutHeartbeatDuration = d
 }
+
+func (s *Scheduler) SetupDoneChan() chan struct{} {
+	return s.setupDoneChan
+}

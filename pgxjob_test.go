@@ -1393,6 +1393,12 @@ func TestSchedulerContext(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	select {
+	case <-scheduler.SetupDoneChan():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for scheduler to start")
+	}
+
 	require.Nil(t, pgxjob.Ctx(ctx))
 	pgxjob.DefaultContextScheduler = scheduler
 	require.Equal(t, scheduler, pgxjob.Ctx(ctx))
@@ -1412,6 +1418,12 @@ func TestSchedulerContext(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+
+	select {
+	case <-otherScheduler.SetupDoneChan():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for scheduler to start")
+	}
 
 	otherCtx := otherScheduler.WithContext(ctx)
 	require.Equal(t, otherScheduler, pgxjob.Ctx(otherCtx))
